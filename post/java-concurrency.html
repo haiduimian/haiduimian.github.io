@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Java 并发编程：多线程与线程池 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#为什么需要多线程">为什么需要多线程</a></li><li class="toc-l2"><a href="#线程的创建方式">线程的创建方式</a></li><li class="toc-l2"><a href="#线程状态与生命周期">线程状态与生命周期</a></li><li class="toc-l2"><a href="#锁-synchronized-与-lock">锁：synchronized 与 Lock</a></li><li class="toc-l2"><a href="#线程池-核心参数">线程池：核心参数</a></li><li class="toc-l2"><a href="#volatile-可见性与有序性">volatile：可见性与有序性</a></li><li class="toc-l2"><a href="#completablefuture-异步编排">CompletableFuture：异步编排</a></li><li class="toc-l2"><a href="#并发工具类速查">并发工具类速查</a></li><li class="toc-l2"><a href="#经验小结">经验小结</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">☕ Java 核心</span></p>
+      <h1>Java 并发编程：多线程与线程池</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2025-03-01</span>
+        <span class="meta-read">☕ 预计阅读 8 分钟</span>
+        <span class="meta-tags"><code>#并发</code> <code>#线程池</code> <code>#JUC</code> <code>#多线程</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<blockquote>
+<p>原博客的「多进程，多线程」笔记基于 Python 的 multiprocessing/threading，这篇换成 Java 版本：JUC 工具、线程池原理与并发实战。Java 的并发模型和 Python 差异很大——重点是<strong>共享内存 + 显式锁</strong>，而不是 GIL 下的资源竞争。</p>
+</blockquote>
+<h2 id="为什么需要多线程">为什么需要多线程</h2><p>单线程顺序执行，遇到 IO 只能干等：</p>
+<pre><code class="language-java"><span class="hljs-comment">// 串行：总耗时 = t1 + t2 + t3</span>
+<span class="hljs-type">String</span> <span class="hljs-variable">data1</span> <span class="hljs-operator">=</span> httpGet(<span class="hljs-string">&quot;http://api.a.com&quot;</span>);
+<span class="hljs-type">String</span> <span class="hljs-variable">data2</span> <span class="hljs-operator">=</span> httpGet(<span class="hljs-string">&quot;http://api.b.com&quot;</span>);
+<span class="hljs-type">String</span> <span class="hljs-variable">data3</span> <span class="hljs-operator">=</span> httpGet(<span class="hljs-string">&quot;http://api.c.com&quot;</span>);
+</code></pre><p>如果三个请求互不依赖，用线程池并行，总耗时 ≈ max(t1, t2, t3)：</p>
+<pre><code class="language-java"><span class="hljs-type">ExecutorService</span> <span class="hljs-variable">pool</span> <span class="hljs-operator">=</span> Executors.newFixedThreadPool(<span class="hljs-number">3</span>);
+<span class="hljs-type">Future</span>&lt;String&gt; <span class="hljs-variable">f1</span> <span class="hljs-operator">=</span> pool.submit(() -&gt; httpGet(<span class="hljs-string">&quot;http://api.a.com&quot;</span>));
+<span class="hljs-type">Future</span>&lt;String&gt; <span class="hljs-variable">f2</span> <span class="hljs-operator">=</span> pool.submit(() -&gt; httpGet(<span class="hljs-string">&quot;http://api.b.com&quot;</span>));
+<span class="hljs-type">Future</span>&lt;String&gt; <span class="hljs-variable">f3</span> <span class="hljs-operator">=</span> pool.submit(() -&gt; httpGet(<span class="hljs-string">&quot;http://api.c.com&quot;</span>));
+<span class="hljs-type">String</span> <span class="hljs-variable">a</span> <span class="hljs-operator">=</span> f1.get();
+<span class="hljs-type">String</span> <span class="hljs-variable">b</span> <span class="hljs-operator">=</span> f2.get();
+<span class="hljs-type">String</span> <span class="hljs-variable">c</span> <span class="hljs-operator">=</span> f3.get();
+</code></pre><h2 id="线程的创建方式">线程的创建方式</h2><pre><code class="language-java"><span class="hljs-comment">// 方式一：继承 Thread（不推荐，Java 单继承）</span>
+<span class="hljs-keyword">class</span> <span class="hljs-title class_">MyThread</span> <span class="hljs-keyword">extends</span> <span class="hljs-title class_">Thread</span> {
+    <span class="hljs-meta">@Override</span> <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">run</span><span class="hljs-params">()</span> { <span class="hljs-comment">/* ... */</span> }
+}
+
+<span class="hljs-comment">// 方式二：实现 Runnable（无返回值）</span>
+<span class="hljs-type">Runnable</span> <span class="hljs-variable">task</span> <span class="hljs-operator">=</span> () -&gt; System.out.println(<span class="hljs-string">&quot;hello&quot;</span>);
+
+<span class="hljs-comment">// 方式三：Callable + Future（有返回值）</span>
+<span class="hljs-type">Callable</span>&lt;Integer&gt; <span class="hljs-variable">task</span> <span class="hljs-operator">=</span> () -&gt; <span class="hljs-number">1</span> + <span class="hljs-number">1</span>;
+<span class="hljs-type">Future</span>&lt;Integer&gt; <span class="hljs-variable">future</span> <span class="hljs-operator">=</span> executor.submit(task);
+</code></pre><blockquote>
+<p><strong>禁止直接 new Thread()</strong>：每来一个请求就建一个线程，线程数量不受控，高并发下直接 OOM。务必使用线程池。</p>
+</blockquote>
+<h2 id="线程状态与生命周期">线程状态与生命周期</h2><pre><code class="language-plaintext"><span class="hljs-keyword">NEW</span> → RUNNABLE → BLOCKED → WAITING / TIMED_WAITING → TERMINATED
+</code></pre><table>
+<thead>
+<tr>
+<th>状态</th>
+<th>触发条件</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>NEW</td>
+<td>new 出来还没 start()</td>
+</tr>
+<tr>
+<td>RUNNABLE</td>
+<td>可运行 / 运行中（包含等待 CPU 时间片）</td>
+</tr>
+<tr>
+<td>BLOCKED</td>
+<td>等 synchronized 锁（没抢到）</td>
+</tr>
+<tr>
+<td>WAITING</td>
+<td>wait()、join()，需要被 notify</td>
+</tr>
+<tr>
+<td>TIMED_WAITING</td>
+<td>sleep()、wait(ms)、join(ms)</td>
+</tr>
+<tr>
+<td>TERMINATED</td>
+<td>run() 执行完或异常退出</td>
+</tr>
+</tbody></table>
+<h2 id="锁-synchronized-与-lock">锁：synchronized 与 Lock</h2><p><code>synchronized</code> 是 JVM 内置锁（偏向锁→轻量级→重量级），<code>Lock</code> 是 JDK 提供的接口（如 <code>ReentrantLock</code>）。</p>
+<pre><code class="language-java"><span class="hljs-comment">// synchronized 同步代码块</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">synchronized</span> <span class="hljs-type">void</span> <span class="hljs-title function_">increment</span><span class="hljs-params">()</span> { count++; }
+
+<span class="hljs-comment">// ReentrantLock 手动加解锁</span>
+<span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> <span class="hljs-type">Lock</span> <span class="hljs-variable">lock</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ReentrantLock</span>();
+<span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">increment</span><span class="hljs-params">()</span> {
+    lock.lock();
+    <span class="hljs-keyword">try</span> {
+        count++;
+    } <span class="hljs-keyword">finally</span> {
+        lock.unlock();   <span class="hljs-comment">// 必须 finally 释放！</span>
+    }
+}
+</code></pre><p><strong>原子性问题的本质</strong>：<code>count++</code> 不是原子操作（读-改-写三步），多线程并发执行时会丢更新。解决思路：加锁、或用原子类。</p>
+<pre><code class="language-java"><span class="hljs-type">AtomicInteger</span> <span class="hljs-variable">count</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">AtomicInteger</span>(<span class="hljs-number">0</span>);
+count.incrementAndGet();   <span class="hljs-comment">// CAS 无锁实现</span>
+</code></pre><h2 id="线程池-核心参数">线程池：核心参数</h2><p>阿里巴巴开发手册要求 <strong>不要用 Executors 快捷方法</strong>（newFixedThreadPool 的队列无界、newSingleThreadExecutor 同理，会堆积任务导致 OOM），手动 new ThreadPoolExecutor：</p>
+<pre><code class="language-java"><span class="hljs-type">ThreadPoolExecutor</span> <span class="hljs-variable">pool</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ThreadPoolExecutor</span>(
+    <span class="hljs-number">5</span>,                          <span class="hljs-comment">// corePoolSize 核心线程数</span>
+    <span class="hljs-number">10</span>,                         <span class="hljs-comment">// maximumPoolSize 最大线程数</span>
+    <span class="hljs-number">60L</span>, TimeUnit.SECONDS,      <span class="hljs-comment">// 空闲线程存活时间</span>
+    <span class="hljs-keyword">new</span> <span class="hljs-title class_">ArrayBlockingQueue</span>&lt;&gt;(<span class="hljs-number">100</span>),  <span class="hljs-comment">// 工作队列</span>
+    Executors.defaultThreadFactory(),
+    <span class="hljs-keyword">new</span> <span class="hljs-title class_">ThreadPoolExecutor</span>.AbortPolicy()  <span class="hljs-comment">// 拒绝策略</span>
+);
+</code></pre><p><strong>执行流程</strong>（必须背下来）：</p>
+<ol>
+<li>核心线程未满 → 新建线程执行</li>
+<li>核心线程已满 → 任务进工作队列</li>
+<li>队列已满 → 扩容到 maximumPoolSize</li>
+<li>仍满 → 触发拒绝策略</li>
+</ol>
+<p><strong>拒绝策略四种</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>策略</th>
+<th>行为</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>AbortPolicy</td>
+<td>抛 RejectedExecutionException（默认）</td>
+</tr>
+<tr>
+<td>CallerRunsPolicy</td>
+<td>让提交者线程自己执行（常用！利于削峰）</td>
+</tr>
+<tr>
+<td>DiscardPolicy</td>
+<td>直接丢弃</td>
+</tr>
+<tr>
+<td>DiscardOldestPolicy</td>
+<td>丢弃队列最老的任务</td>
+</tr>
+</tbody></table>
+<h2 id="volatile-可见性与有序性">volatile：可见性与有序性</h2><pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">Flag</span> {
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">volatile</span> <span class="hljs-type">boolean</span> <span class="hljs-variable">running</span> <span class="hljs-operator">=</span> <span class="hljs-literal">true</span>;
+
+    <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">stop</span><span class="hljs-params">()</span> { running = <span class="hljs-literal">false</span>; }
+    <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">loop</span><span class="hljs-params">()</span> {
+        <span class="hljs-keyword">while</span> (running) { <span class="hljs-comment">/* 干活 */</span> }
+    }
+}
+</code></pre><p>没有 volatile 时，线程可能永远看不到 running 被改（工作内存拷贝）。volatile 保证：</p>
+<ul>
+<li><strong>可见性</strong>：写操作立即刷新到主内存，读操作从主内存读</li>
+<li><strong>有序性</strong>：禁止指令重排序（如单例双重检查锁中的 use）</li>
+<li>但 volatile <strong>不保证原子性</strong>，i++ 这种还是要锁</li>
+</ul>
+<h2 id="completablefuture-异步编排">CompletableFuture：异步编排</h2><p>Java 8 之后的异步利器，串行/并行/异常处理都很优雅：</p>
+<pre><code class="language-java"><span class="hljs-type">CompletableFuture</span>&lt;String&gt; <span class="hljs-variable">f1</span> <span class="hljs-operator">=</span> CompletableFuture.supplyAsync(() -&gt; httpGet(<span class="hljs-string">&quot;api.a&quot;</span>));
+<span class="hljs-type">CompletableFuture</span>&lt;String&gt; <span class="hljs-variable">f2</span> <span class="hljs-operator">=</span> CompletableFuture.supplyAsync(() -&gt; httpGet(<span class="hljs-string">&quot;api.b&quot;</span>));
+
+<span class="hljs-comment">// 两个都完成后再处理（并行聚合）</span>
+<span class="hljs-type">CompletableFuture</span>&lt;String&gt; <span class="hljs-variable">result</span> <span class="hljs-operator">=</span> f1.thenCombine(f2, (a, b) -&gt; a + b);
+
+<span class="hljs-comment">// 任一完成即可</span>
+<span class="hljs-type">CompletableFuture</span>&lt;Object&gt; <span class="hljs-variable">any</span> <span class="hljs-operator">=</span> CompletableFuture.anyOf(f1, f2);
+
+<span class="hljs-comment">// 异常兜底</span>
+<span class="hljs-type">CompletableFuture</span>&lt;String&gt; <span class="hljs-variable">safe</span> <span class="hljs-operator">=</span> f1.exceptionally(e -&gt; <span class="hljs-string">&quot;fallback&quot;</span>);
+</code></pre><p>默认使用 ForkJoinPool.commonPool()，<strong>IO 密集型任务建议自定义线程池</strong>传进去。</p>
+<h2 id="并发工具类速查">并发工具类速查</h2><table>
+<thead>
+<tr>
+<th>工具</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>CountDownLatch</td>
+<td>倒计时门闩：等 N 个任务都完成后放行</td>
+</tr>
+<tr>
+<td>CyclicBarrier</td>
+<td>循环屏障：N 个线程互相等待齐后一起出发</td>
+</tr>
+<tr>
+<td>Semaphore</td>
+<td>信号量：限流，最多 N 个并发</td>
+</tr>
+<tr>
+<td>ConcurrentHashMap</td>
+<td>并发安全的 HashMap（锁分段/ CAS）</td>
+</tr>
+<tr>
+<td>CopyOnWriteArrayList</td>
+<td>读多写少场景的线程安全 List</td>
+</tr>
+<tr>
+<td>ThreadLocal</td>
+<td>线程本地变量（注意内存泄漏，用完 remove）</td>
+</tr>
+</tbody></table>
+<h2 id="经验小结">经验小结</h2><ul>
+<li>线程池参数 = f(CPU 核数、任务类型)：CPU 密集 ≈ N+1 线程，IO 密集 ≈ 2N 甚至更高</li>
+<li>队列别用无界队列；拒绝策略优先 CallerRunsPolicy</li>
+<li>锁越小越好：能用原子类不用锁，能用局部变量不用共享变量</li>
+<li>排查线程问题用 <code>jstack &lt;pid&gt;</code>，看 BLOCKED/WAITING 堆栈</li>
+<li>ThreadLocal 务必在 finally 里 remove，否则线程池复用下数据串号</li>
+</ul>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/jvm-memory.html"><span>← 上一篇</span><b>JVM 内存模型与垃圾回收</b></a>
+    <a class="pn-btn next" href="/post/spring-boot-rest.html"><span>下一篇 →</span><b>Spring Boot 从零搭建 RESTful API</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

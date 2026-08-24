@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fxy.dev | 工业物联网技术博客 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="active">首页</a>
+      <a href="/archive.html" class="">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="home">
+  <section class="hero">
+    <div class="hero-content">
+      <p class="hero-kicker">// 工业物联网 · 设备数据采集 · 全栈 · since 2025</p>
+      <h1 class="hero-title"><span class="kw">public</span> <span class="kw">class</span> <span class="cls">Fxy</span> {</h1>
+      <p class="hero-sub">工业物联网与设备数据采集实战笔记 — Modbus/MQTT 协议对接、Netty 采集平台、Spring Boot 后端、App 与全栈开发</p>
+      <div class="hero-actions">
+        <a class="btn primary" href="#posts">开局读文章</a>
+        <a class="btn ghost" href="/about.html">关于我</a>
+      </div>
+    </div>
+    <div class="hero-terminal">
+      <div class="term-head"><span class="tdots"><i></i><i></i><i></i></span><span class="term-title">fxy@java: ~</span></div>
+      <pre class="term-body"><code><span class="t-cmd">$ java BlogApplication.java</span>
+<span class="t-out">  .   ____          _            __ _ _</span>
+<span class="t-out"> /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \</span>
+<span class="t-out">( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \</span>
+<span class="t-out"> \\/  ___)| |_)| | | | | || (_| |  ) ) ) )</span>
+<span class="t-out">  '  |____| .__|_| |_|_| |_\__, | / / / /</span>
+<span class="t-out"> =========|_|==============|___/=/_/_/_/</span>
+<span class="t-out"> :: Spring Boot ::                (v3.4.1)</span>
+
+<span class="t-cmd">$ curl localhost:8080/api/devices/plc-01/data</span>
+<span class="t-out">[{ "deviceId": "plc-01", "temp": 36.5, "pressure": 0.72, "ts": 1754371200 }]</span>
+<span class="t-cursor">█</span></code></pre>
+    </div>
+  </section>
+
+  <section class="home-section"><h2 class="cat-title">⭐ 精选文章</h2><div class="card-grid"><article class="post-card" style="--accent:#f85149">
+  <div class="card-top">
+    <span class="card-cat">🐞 踩坑实战</span>
+    <span class="card-date">2025-12-05</span>
+  </div>
+  <h3 class="card-title"><a href="/post/mqtt-offline-debug.html">400 台设备批量掉线排查：ClientID 冲突引发的血案</a></h3>
+  <p class="card-desc">水表设备频繁掉线的根因分析：ClientID 重复、心跳参数、NAT 映射超时的完整排查实录</p>
+  <div class="card-tags"><code>#MQTT</code><code>#设备掉线</code><code>#故障排查</code><code>#EMQX</code></div>
+  <a class="card-link" href="/post/mqtt-offline-debug.html">java mqtt-offline-debug.java --run →</a>
+</article><article class="post-card" style="--accent:#f89820">
+  <div class="card-top">
+    <span class="card-cat">📡 工业物联网</span>
+    <span class="card-date">2025-10-08</span>
+  </div>
+  <h3 class="card-title"><a href="/post/device-collection.html">工业设备数据采集平台：从 PLC 到数据库的整条链路</a></h3>
+  <p class="card-desc">设备层、采集网关、消息队列、时序存储四层架构实战，附 Netty 接入与高并发写入方案</p>
+  <div class="card-tags"><code>#数据采集</code><code>#架构</code><code>#Netty</code><code>#时序数据库</code></div>
+  <a class="card-link" href="/post/device-collection.html">java device-collection.java --run →</a>
+</article><article class="post-card" style="--accent:#f89820">
+  <div class="card-top">
+    <span class="card-cat">📡 工业物联网</span>
+    <span class="card-date">2025-09-05</span>
+  </div>
+  <h3 class="card-title"><a href="/post/modbus-java.html">Modbus 协议与 Java 实现：工业设备采集第一课</a></h3>
+  <p class="card-desc">Modbus RTU/TCP 帧格式、功能码、寄存器映射，用 Java 完整实现采集一台 PLC 的实战笔记</p>
+  <div class="card-tags"><code>#Modbus</code><code>#PLC</code><code>#工业协议</code><code>#数据采集</code></div>
+  <a class="card-link" href="/post/modbus-java.html">java modbus-java.java --run →</a>
+</article></div></section>
+
+  <section class="home-section" id="posts">
+    <h2 class="cat-title">🔥 最近更新</h2>
+    <div class="card-grid"><article class="post-card" style="--accent:#58a6ff">
+  <div class="card-top">
+    <span class="card-cat">🤖 AI 实战</span>
+    <span class="card-date">2026-08-15</span>
+  </div>
+  <h3 class="card-title"><a href="/post/java-agent.html">从零搭建 Java 数据查询 Agent：告别手写 SQL</a></h3>
+  <p class="card-desc">基于 Spring AI 函数调用实现 NL2SQL 查询 Agent：让大模型帮你写 SQL 查设备数据</p>
+  <div class="card-tags"><code>#Spring AI</code><code>#Agent</code><code>#NL2SQL</code><code>#函数调用</code></div>
+  <a class="card-link" href="/post/java-agent.html">java java-agent.java --run →</a>
+</article><article class="post-card" style="--accent:#58a6ff">
+  <div class="card-top">
+    <span class="card-cat">🤖 AI 实战</span>
+    <span class="card-date">2026-05-15</span>
+  </div>
+  <h3 class="card-title"><a href="/post/spring-ai-rag.html">Spring AI 实战：构建本地 RAG 知识问答</a></h3>
+  <p class="card-desc">用 Spring AI + Ollama 本地部署 Qwen 模型，结合向量库实现文档 RAG 问答</p>
+  <div class="card-tags"><code>#Spring AI</code><code>#RAG</code><code>#Qwen</code><code>#Ollama</code></div>
+  <a class="card-link" href="/post/spring-ai-rag.html">java spring-ai-rag.java --run →</a>
+</article><article class="post-card" style="--accent:#f85149">
+  <div class="card-top">
+    <span class="card-cat">🐞 踩坑实战</span>
+    <span class="card-date">2026-04-25</span>
+  </div>
+  <h3 class="card-title"><a href="/post/oom-debug.html">JVM 内存泄漏排查实录：一次 Full GC 频发的救火经历</a></h3>
+  <p class="card-desc">使用 jmap、jstat、MAT 从崩溃的堆转储中找出 ArrayList 静态容器泄漏的完整过程</p>
+  <div class="card-tags"><code>#JVM</code><code>#内存泄漏</code><code>#MAT</code><code>#调优</code></div>
+  <a class="card-link" href="/post/oom-debug.html">java oom-debug.java --run →</a>
+</article><article class="post-card" style="--accent:#f85149">
+  <div class="card-top">
+    <span class="card-cat">🐞 踩坑实战</span>
+    <span class="card-date">2026-03-16</span>
+  </div>
+  <h3 class="card-title"><a href="/post/mysql-slow-query.html">线上故障排查：一条慢查询引发的服务雪崩</a></h3>
+  <p class="card-desc">一个 Spring Boot 服务偶发超时的排查实录：慢 SQL、连接池耗尽、GC 连锁反应</p>
+  <div class="card-tags"><code>#MySQL</code><code>#故障排查</code><code>#慢查询</code><code>#连接池</code></div>
+  <a class="card-link" href="/post/mysql-slow-query.html">java mysql-slow-query.java --run →</a>
+</article><article class="post-card" style="--accent:#f85149">
+  <div class="card-top">
+    <span class="card-cat">🐞 踩坑实战</span>
+    <span class="card-date">2026-02-05</span>
+  </div>
+  <h3 class="card-title"><a href="/post/api-optimization.html">接口性能优化：从 2 秒到 200 毫秒</a></h3>
+  <p class="card-desc">一个设备数据查询接口从 2s 优化到 200ms 的完整过程：索引、N+1、连接池、缓存</p>
+  <div class="card-tags"><code>#Spring Boot</code><code>#MySQL</code><code>#性能优化</code><code>#缓存</code></div>
+  <a class="card-link" href="/post/api-optimization.html">java api-optimization.java --run →</a>
+</article><article class="post-card" style="--accent:#a371f7">
+  <div class="card-top">
+    <span class="card-cat">⚙️ 工程实践</span>
+    <span class="card-date">2026-01-20</span>
+  </div>
+  <h3 class="card-title"><a href="/post/nginx.html">Nginx 实战：反向代理、负载均衡与静态资源</a></h3>
+  <p class="card-desc">部署 Java 应用必会的 Nginx 配置：location 匹配、upstream 轮询、HTTPS 开启</p>
+  <div class="card-tags"><code>#Nginx</code><code>#反向代理</code><code>#负载均衡</code><code>#HTTPS</code></div>
+  <a class="card-link" href="/post/nginx.html">java nginx.java --run →</a>
+</article></div>
+  </section>
+
+  <section class="cat-section">
+  <h2 class="cat-title">📡 工业物联网 <span class="count">(3)</span></h2>
+  <div class="card-grid"><article class="post-card" style="--accent:#f89820">
+  <div class="card-top">
+    <span class="card-cat">📡 工业物联网</span>
+    <span class="card-date">2025-10-08</span>
+  </div>
+  <h3 class="card-title"><a href="/post/device-collection.html">工业设备数据采集平台：从 PLC 到数据库的整条链路</a></h3>
+  <p class="card-desc">设备层、采集网关、消息队列、时序存储四层架构实战，附 Netty 接入与高并发写入方案</p>
+  <div class="card-tags"><code>#数据采集</code><code>#架构</code><code>#Netty</code><code>#时序数据库</code></div>
+  <a class="card-link" href="/post/device-collection.html">java device-collection.java --run →</a>
+</article><article class="post-card" style="--accent:#f89820">
+  <div class="card-top">
+    <span class="card-cat">📡 工业物联网</span>
+    <span class="card-date">2025-09-07</span>
+  </div>
+  <h3 class="card-title"><a href="/post/mqtt-java.html">MQTT 协议与 Java 实战：物联网设备接入</a></h3>
+  <p class="card-desc">MQTT 核心概念（QoS、Topic、遗嘱消息）+ Eclipse Paho 客户端收发消息完整示例</p>
+  <div class="card-tags"><code>#MQTT</code><code>#物联网</code><code>#Paho</code><code>#协议</code></div>
+  <a class="card-link" href="/post/mqtt-java.html">java mqtt-java.java --run →</a>
+</article><article class="post-card" style="--accent:#f89820">
+  <div class="card-top">
+    <span class="card-cat">📡 工业物联网</span>
+    <span class="card-date">2025-09-05</span>
+  </div>
+  <h3 class="card-title"><a href="/post/modbus-java.html">Modbus 协议与 Java 实现：工业设备采集第一课</a></h3>
+  <p class="card-desc">Modbus RTU/TCP 帧格式、功能码、寄存器映射，用 Java 完整实现采集一台 PLC 的实战笔记</p>
+  <div class="card-tags"><code>#Modbus</code><code>#PLC</code><code>#工业协议</code><code>#数据采集</code></div>
+  <a class="card-link" href="/post/modbus-java.html">java modbus-java.java --run →</a>
+</article></div>
+</section><section class="cat-section">
+  <h2 class="cat-title">🐞 踩坑实战 <span class="count">(4)</span></h2>
+  <div class="card-grid"><article class="post-card" style="--accent:#f85149">
+  <div class="card-top">
+    <span class="card-cat">🐞 踩坑实战</span>
+    <span class="card-date">2026-04-25</span>
+  </div>
+  <h3 class="card-title"><a href="/post/oom-debug.html">JVM 内存泄漏排查实录：一次 Full GC 频发的救火经历</a></h3>
+  <p class="card-desc">使用 jmap、jstat、MAT 从崩溃的堆转储中找出 ArrayList 静态容器泄漏的完整过程</p>
+  <div class="card-tags"><code>#JVM</code><code>#内存泄漏</code><code>#MAT</code><code>#调优</code></div>
+  <a class="card-link" href="/post/oom-debug.html">java oom-debug.java --run →</a>
+</article><article class="post-card" style="--accent:#f85149">
+  <div class="card-top">
+    <span class="card-cat">🐞 踩坑实战</span>
+    <span class="card-date">2026-03-16</span>
+  </div>
+  <h3 class="card-title"><a href="/post/mysql-slow-query.html">线上故障排查：一条慢查询引发的服务雪崩</a></h3>
+  <p class="card-desc">一个 Spring Boot 服务偶发超时的排查实录：慢 SQL、连接池耗尽、GC 连锁反应</p>
+  <div class="card-tags"><code>#MySQL</code><code>#故障排查</code><code>#慢查询</code><code>#连接池</code></div>
+  <a class="card-link" href="/post/mysql-slow-query.html">java mysql-slow-query.java --run →</a>
+</article><article class="post-card" style="--accent:#f85149">
+  <div class="card-top">
+    <span class="card-cat">🐞 踩坑实战</span>
+    <span class="card-date">2026-02-05</span>
+  </div>
+  <h3 class="card-title"><a href="/post/api-optimization.html">接口性能优化：从 2 秒到 200 毫秒</a></h3>
+  <p class="card-desc">一个设备数据查询接口从 2s 优化到 200ms 的完整过程：索引、N+1、连接池、缓存</p>
+  <div class="card-tags"><code>#Spring Boot</code><code>#MySQL</code><code>#性能优化</code><code>#缓存</code></div>
+  <a class="card-link" href="/post/api-optimization.html">java api-optimization.java --run →</a>
+</article><article class="post-card" style="--accent:#f85149">
+  <div class="card-top">
+    <span class="card-cat">🐞 踩坑实战</span>
+    <span class="card-date">2025-12-05</span>
+  </div>
+  <h3 class="card-title"><a href="/post/mqtt-offline-debug.html">400 台设备批量掉线排查：ClientID 冲突引发的血案</a></h3>
+  <p class="card-desc">水表设备频繁掉线的根因分析：ClientID 重复、心跳参数、NAT 映射超时的完整排查实录</p>
+  <div class="card-tags"><code>#MQTT</code><code>#设备掉线</code><code>#故障排查</code><code>#EMQX</code></div>
+  <a class="card-link" href="/post/mqtt-offline-debug.html">java mqtt-offline-debug.java --run →</a>
+</article></div>
+</section><section class="cat-section">
+  <h2 class="cat-title">☕ Java 核心 <span class="count">(3)</span></h2>
+  <div class="card-grid"><article class="post-card" style="--accent:#e76f00">
+  <div class="card-top">
+    <span class="card-cat">☕ Java 核心</span>
+    <span class="card-date">2025-04-20</span>
+  </div>
+  <h3 class="card-title"><a href="/post/jvm-memory.html">JVM 内存模型与垃圾回收</a></h3>
+  <p class="card-desc">运行时数据区、对象分配、GC 算法与常用调优参数，理解 Java 内存世界的必修课</p>
+  <div class="card-tags"><code>#JVM</code><code>#内存模型</code><code>#GC</code><code>#调优</code></div>
+  <a class="card-link" href="/post/jvm-memory.html">java jvm-memory.java --run →</a>
+</article><article class="post-card" style="--accent:#e76f00">
+  <div class="card-top">
+    <span class="card-cat">☕ Java 核心</span>
+    <span class="card-date">2025-03-01</span>
+  </div>
+  <h3 class="card-title"><a href="/post/java-concurrency.html">Java 并发编程：多线程与线程池</a></h3>
+  <p class="card-desc">从 Thread 到 CompletableFuture，线程状态、锁、线程池参数与并发工具类的实战笔记</p>
+  <div class="card-tags"><code>#并发</code><code>#线程池</code><code>#JUC</code><code>#多线程</code></div>
+  <a class="card-link" href="/post/java-concurrency.html">java java-concurrency.java --run →</a>
+</article><article class="post-card" style="--accent:#e76f00">
+  <div class="card-top">
+    <span class="card-cat">☕ Java 核心</span>
+    <span class="card-date">2025-01-10</span>
+  </div>
+  <h3 class="card-title"><a href="/post/spring-boot-rest.html">Spring Boot 从零搭建 RESTful API</a></h3>
+  <p class="card-desc">REST 规范、分层架构、参数校验与统一异常处理，一份 Spring Boot 3 开发 REST API 的完整笔记</p>
+  <div class="card-tags"><code>#Spring Boot</code><code>#REST</code><code>#API</code><code>#MyBatis</code></div>
+  <a class="card-link" href="/post/spring-boot-rest.html">java spring-boot-rest.java --run →</a>
+</article></div>
+</section><section class="cat-section">
+  <h2 class="cat-title">🤖 AI 实战 <span class="count">(2)</span></h2>
+  <div class="card-grid"><article class="post-card" style="--accent:#58a6ff">
+  <div class="card-top">
+    <span class="card-cat">🤖 AI 实战</span>
+    <span class="card-date">2026-08-15</span>
+  </div>
+  <h3 class="card-title"><a href="/post/java-agent.html">从零搭建 Java 数据查询 Agent：告别手写 SQL</a></h3>
+  <p class="card-desc">基于 Spring AI 函数调用实现 NL2SQL 查询 Agent：让大模型帮你写 SQL 查设备数据</p>
+  <div class="card-tags"><code>#Spring AI</code><code>#Agent</code><code>#NL2SQL</code><code>#函数调用</code></div>
+  <a class="card-link" href="/post/java-agent.html">java java-agent.java --run →</a>
+</article><article class="post-card" style="--accent:#58a6ff">
+  <div class="card-top">
+    <span class="card-cat">🤖 AI 实战</span>
+    <span class="card-date">2026-05-15</span>
+  </div>
+  <h3 class="card-title"><a href="/post/spring-ai-rag.html">Spring AI 实战：构建本地 RAG 知识问答</a></h3>
+  <p class="card-desc">用 Spring AI + Ollama 本地部署 Qwen 模型，结合向量库实现文档 RAG 问答</p>
+  <div class="card-tags"><code>#Spring AI</code><code>#RAG</code><code>#Qwen</code><code>#Ollama</code></div>
+  <a class="card-link" href="/post/spring-ai-rag.html">java spring-ai-rag.java --run →</a>
+</article></div>
+</section><section class="cat-section">
+  <h2 class="cat-title">🗄️ 数据库 <span class="count">(2)</span></h2>
+  <div class="card-grid"><article class="post-card" style="--accent:#3fb950">
+  <div class="card-top">
+    <span class="card-cat">🗄️ 数据库</span>
+    <span class="card-date">2025-07-20</span>
+  </div>
+  <h3 class="card-title"><a href="/post/mysql-lock.html">MySQL 锁机制：从行锁到死锁实战</a></h3>
+  <p class="card-desc">InnoDB 行锁、间隙锁、临键锁原理，以及一个 UPDATE 死锁的完整案例</p>
+  <div class="card-tags"><code>#MySQL</code><code>#锁</code><code>#InnoDB</code><code>#死锁</code></div>
+  <a class="card-link" href="/post/mysql-lock.html">java mysql-lock.java --run →</a>
+</article><article class="post-card" style="--accent:#3fb950">
+  <div class="card-top">
+    <span class="card-cat">🗄️ 数据库</span>
+    <span class="card-date">2025-05-05</span>
+  </div>
+  <h3 class="card-title"><a href="/post/mysql-index.html">MySQL 索引优化实战：从全表扫描到索引覆盖</a></h3>
+  <p class="card-desc">最左前缀、回表与覆盖索引、索引失效场景，附 EXPLAIN 实战分析</p>
+  <div class="card-tags"><code>#MySQL</code><code>#索引</code><code>#EXPLAIN</code><code>#性能</code></div>
+  <a class="card-link" href="/post/mysql-index.html">java mysql-index.java --run →</a>
+</article></div>
+</section><section class="cat-section">
+  <h2 class="cat-title">⚙️ 工程实践 <span class="count">(2)</span></h2>
+  <div class="card-grid"><article class="post-card" style="--accent:#a371f7">
+  <div class="card-top">
+    <span class="card-cat">⚙️ 工程实践</span>
+    <span class="card-date">2026-01-20</span>
+  </div>
+  <h3 class="card-title"><a href="/post/nginx.html">Nginx 实战：反向代理、负载均衡与静态资源</a></h3>
+  <p class="card-desc">部署 Java 应用必会的 Nginx 配置：location 匹配、upstream 轮询、HTTPS 开启</p>
+  <div class="card-tags"><code>#Nginx</code><code>#反向代理</code><code>#负载均衡</code><code>#HTTPS</code></div>
+  <a class="card-link" href="/post/nginx.html">java nginx.java --run →</a>
+</article><article class="post-card" style="--accent:#a371f7">
+  <div class="card-top">
+    <span class="card-cat">⚙️ 工程实践</span>
+    <span class="card-date">2025-11-02</span>
+  </div>
+  <h3 class="card-title"><a href="/post/docker-java.html">Docker 部署 Spring Boot 应用：从 Dockerfile 到 Compose</a></h3>
+  <p class="card-desc">多阶段构建、精简镜像、环境变量注入与 docker-compose 一键编排 MySQL+Redis+应用</p>
+  <div class="card-tags"><code>#Docker</code><code>#Spring Boot</code><code>#DevOps</code><code>#Compose</code></div>
+  <a class="card-link" href="/post/docker-java.html">java docker-java.java --run →</a>
+</article></div>
+</section><section class="cat-section">
+  <h2 class="cat-title">📝 学习笔记 <span class="count">(2)</span></h2>
+  <div class="card-grid"><article class="post-card" style="--accent:#39c5cf">
+  <div class="card-top">
+    <span class="card-cat">📝 学习笔记</span>
+    <span class="card-date">2025-10-15</span>
+  </div>
+  <h3 class="card-title"><a href="/post/bit-trick.html">找单独的数：一道题吃透 Java 位运算</a></h3>
+  <p class="card-desc">从数组中找出唯一出现一次的数，用异或、与、移位彻底理解位运算</p>
+  <div class="card-tags"><code>#算法</code><code>#位运算</code><code>#Java</code></div>
+  <a class="card-link" href="/post/bit-trick.html">java bit-trick.java --run →</a>
+</article><article class="post-card" style="--accent:#39c5cf">
+  <div class="card-top">
+    <span class="card-cat">📝 学习笔记</span>
+    <span class="card-date">2025-08-01</span>
+  </div>
+  <h3 class="card-title"><a href="/post/design-patterns.html">Java 设计模式实战：单例、策略与模板方法</a></h3>
+  <p class="card-desc">工作中高频使用的 6 个设计模式，附真实业务场景与完整 Java 代码</p>
+  <div class="card-tags"><code>#设计模式</code><code>#Java</code><code>#架构</code></div>
+  <a class="card-link" href="/post/design-patterns.html">java design-patterns.java --run →</a>
+</article></div>
+</section>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

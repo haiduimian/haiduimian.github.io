@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>接口性能优化：从 2 秒到 200 毫秒 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#背景-一次常规需求背后的性能债">背景：一次常规需求背后的性能债</a></li><li class="toc-l2"><a href="#现象-压测数据不会骗人">现象：压测数据不会骗人</a></li><li class="toc-l2"><a href="#定位-先别急着改代码">定位：先别急着改代码</a></li><li class="toc-l3"><a href="#第一步-开慢查询日志">第一步：开慢查询日志</a></li><li class="toc-l3"><a href="#第二步-arthas-火焰图确认时间去向">第二步：Arthas 火焰图确认时间去向</a></li><li class="toc-l3"><a href="#第三步-链路追踪确认外部依赖">第三步：链路追踪确认外部依赖</a></li><li class="toc-l2"><a href="#优化一-给-sql-建对索引">优化一：给 SQL 建对索引</a></li><li class="toc-l3"><a href="#联合索引">联合索引</a></li><li class="toc-l3"><a href="#覆盖索引">覆盖索引</a></li><li class="toc-l2"><a href="#优化二-干掉-n-1-查询">优化二：干掉 N+1 查询</a></li><li class="toc-l3"><a href="#问题复现">问题复现</a></li><li class="toc-l3"><a href="#批量改造">批量改造</a></li><li class="toc-l2"><a href="#优化三-redis-缓存-分布式锁防击穿">优化三：Redis 缓存 + 分布式锁防击穿</a></li><li class="toc-l3"><a href="#为什么需要缓存">为什么需要缓存</a></li><li class="toc-l3"><a href="#缓存击穿的标准解法-互斥锁-双检">缓存击穿的标准解法：互斥锁 + 双检</a></li><li class="toc-l3"><a href="#更新侧-删除缓存而非更新缓存">更新侧：删除缓存而非更新缓存</a></li><li class="toc-l2"><a href="#优化前后对比">优化前后对比</a></li><li class="toc-l2"><a href="#总结-一份可复用的性能优化-checklist">总结：一份可复用的性能优化 Checklist</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">🐞 踩坑实战</span></p>
+      <h1>接口性能优化：从 2 秒到 200 毫秒</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2026-02-05</span>
+        <span class="meta-read">☕ 预计阅读 15 分钟</span>
+        <span class="meta-tags"><code>#Spring Boot</code> <code>#MySQL</code> <code>#性能优化</code> <code>#缓存</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="背景-一次常规需求背后的性能债">背景：一次常规需求背后的性能债</h2><p>一月底我们上线了「设备数据平台」的一个新版本，核心改动是把设备列表页从「每页查库」改成了「服务端聚合」：值班同事点开设备历史数据查询页，后端一次性返回设备概要、最新遥测数据（温度/压力/电量）、在线状态。</p>
+<p>需求评审时大家觉得这接口逻辑简单，无非是查几张表拼一个 VO，预估 QPS 也就几百，没做任何性能设计。结果上线第三天，线上开始出现零星超时告警，群里截图一张接一张。我把问题接口拉出来压了一把，数据相当难看——于是有了这篇「从 2 秒到 200 毫秒」的完整记录。</p>
+<h2 id="现象-压测数据不会骗人">现象：压测数据不会骗人</h2><p>先用 JMeter 在测试环境压一下 <code>GET /api/v1/devices/data/list</code>，参数固定 deviceId + 在线状态筛选 + 时间范围 + 分页，200 并发、持续 5 分钟：</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>压测结果</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>平均响应时间</td>
+<td>1.87 s</td>
+</tr>
+<tr>
+<td>P95</td>
+<td>2.34 s</td>
+</tr>
+<tr>
+<td>P99</td>
+<td>2.61 s</td>
+</tr>
+<tr>
+<td>QPS</td>
+<td>118</td>
+</tr>
+<tr>
+<td>错误率</td>
+<td>0.42%（超时）</td>
+</tr>
+</tbody></table>
+<p>这个接口是给设备数据平台的监控大屏和值班同事用的，P99 2.6 秒基本等于「转圈加载」，平台负责人已经在催了。而且 QPS 118 就到顶，说明瓶颈不在网络，在我们的代码和数据库。</p>
+<blockquote>
+<p>压测基线条件：应用 2C4G 单实例、MySQL 8.0 单库、设备上报数据表 800 万行。</p>
+</blockquote>
+<h2 id="定位-先别急着改代码">定位：先别急着改代码</h2><h3 id="第一步-开慢查询日志">第一步：开慢查询日志</h3><p>第一反应是看 SQL。线上 MySQL 慢查询阈值默认 10 秒，太钝了，先把它调成 1 秒，观察半小时：</p>
+<pre><code class="language-sql"><span class="hljs-comment">-- 全局设置（生产建议写进 my.cnf 持久化）</span>
+<span class="hljs-keyword">SET</span> <span class="hljs-keyword">GLOBAL</span> slow_query_log <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;ON&#x27;</span>;
+<span class="hljs-keyword">SET</span> <span class="hljs-keyword">GLOBAL</span> long_query_time <span class="hljs-operator">=</span> <span class="hljs-number">1</span>;
+<span class="hljs-keyword">SET</span> <span class="hljs-keyword">GLOBAL</span> log_queries_not_using_indexes <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;ON&#x27;</span>;
+</code></pre><p>半小时后拉日志，一条 SQL 反复出现，单次执行 1.8~2.1 秒：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> id, device_id, device_no, status, temperature, report_time
+<span class="hljs-keyword">FROM</span> t_device_data
+<span class="hljs-keyword">WHERE</span> device_id <span class="hljs-operator">=</span> <span class="hljs-number">123456</span>
+  <span class="hljs-keyword">AND</span> status <span class="hljs-operator">=</span> <span class="hljs-number">1</span>
+  <span class="hljs-keyword">AND</span> report_time <span class="hljs-keyword">BETWEEN</span> <span class="hljs-string">&#x27;2025-04-01 00:00:00&#x27;</span> <span class="hljs-keyword">AND</span> <span class="hljs-string">&#x27;2025-05-01 00:00:00&#x27;</span>
+<span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> report_time <span class="hljs-keyword">DESC</span>
+LIMIT <span class="hljs-number">0</span>, <span class="hljs-number">20</span>;
+</code></pre><p><code>EXPLAIN</code> 一看，<code>type = ALL</code>，全表扫描，<code>rows = 7,860,321</code>，Extra 里还有个 <code>Using filesort</code>。</p>
+<h3 id="第二步-arthas-火焰图确认时间去向">第二步：Arthas 火焰图确认时间去向</h3><p>慢 SQL 找到了，但我想确认整个请求的时间分布——也许还有别的地方在拖。用 Arthas 挂到测试环境实例上采样：</p>
+<pre><code class="language-bash"><span class="hljs-comment"># 挂载到目标进程</span>
+java -jar arthas-boot.jar 28930
+
+<span class="hljs-comment"># 生成 CPU 火焰图，采样 30 秒</span>
+profiler start --duration 30
+profiler stop --format html --file /tmp/flame.html
+</code></pre><p>火焰图上看，<code>com.xxx.device.service.DeviceDataQueryService.list()</code> 内部的时间几乎全压在 <code>JdbcTemplate.execute</code> → mysql-connector 的 <code>executeQuery</code> 上，占调用树总宽的 89%。也就是说：瓶颈就一个，SQL 本身。</p>
+<h3 id="第三步-链路追踪确认外部依赖">第三步：链路追踪确认外部依赖</h3><p>顺手用 SkyWalking 看了一眼这个接口的 trace，span 明细如下：</p>
+<table>
+<thead>
+<tr>
+<th>Span</th>
+<th>耗时占比</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DB 查询（设备主查询）</td>
+<td>62%</td>
+</tr>
+<tr>
+<td>DB 查询（遥测明细循环 20 次）</td>
+<td>27%</td>
+</tr>
+<tr>
+<td>其他（序列化、日志等）</td>
+<td>11%</td>
+</tr>
+</tbody></table>
+<p>主查询 62%，加上循环明细 27%——两个问题都实锤了：<strong>一条慢 SQL + 一个 N+1</strong>。</p>
+<h2 id="优化一-给-sql-建对索引">优化一：给 SQL 建对索引</h2><h3 id="联合索引">联合索引</h3><p>原表只有主键索引和一个 <code>idx_device_id</code>。查询条件是 <code>device_id + status + report_time</code>（等值 + 范围），排序又要 <code>report_time DESC</code>。按最左前缀原则建联合索引：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">ALTER TABLE</span> t_device_data
+    <span class="hljs-keyword">ADD</span> INDEX idx_device_id_status_time (device_id, status, report_time);
+</code></pre><p>再 EXPLAIN：<code>type = ref</code>，<code>rows</code> 从 786 万降到 2400，<code>Using filesort</code> 消失（联合索引天然有序，排序直接走索引）。</p>
+<h3 id="覆盖索引">覆盖索引</h3><p>业务上列表只需要 7 个字段，但 <code>SELECT *</code> 风格的写法会回表。干脆把查询涉及的列全部塞进索引，变成覆盖索引，省掉回表的随机 IO：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">ALTER TABLE</span> t_device_data
+    <span class="hljs-keyword">ADD</span> INDEX idx_device_status_time_cover (device_id, status, report_time, id, device_no, temperature);
+</code></pre><blockquote>
+<p>覆盖索引的本质：索引 B+ 树叶子节点已经包含所需列，InnoDB 不需要再走聚簇索引回表。代价是索引体积变大、写入变慢，所以只对「高频且结果列少」的查询做。</p>
+</blockquote>
+<p>这次之后，慢查询日志里这条 SQL 彻底消失了，单次执行稳定在 18ms 左右。</p>
+<h2 id="优化二-干掉-n-1-查询">优化二：干掉 N+1 查询</h2><h3 id="问题复现">问题复现</h3><p>主查询快了，但火焰图里那 27% 还在。看代码，典型的 N+1：</p>
+<pre><code class="language-java"><span class="hljs-comment">// 改造前：循环 20 次，每次查一次该设备的遥测明细</span>
+<span class="hljs-type">List</span>&lt;DeviceDataVO&gt; <span class="hljs-variable">devices</span> <span class="hljs-operator">=</span> deviceDataMapper.selectPage(deviceId, status, begin, end);
+<span class="hljs-keyword">for</span> (DeviceDataVO device : devices) {
+    <span class="hljs-type">List</span>&lt;DeviceTelemetryVO&gt; <span class="hljs-variable">items</span> <span class="hljs-operator">=</span> telemetryMapper.selectByDeviceId(device.getId()); <span class="hljs-comment">// 20 次查询！</span>
+    device.setItems(items);
+}
+</code></pre><p>一次列表请求 = 1 次主查询 + 20 次明细查询 = 21 个数据库 round trip。主查询本身又慢，整个接口直接 2 秒。</p>
+<h3 id="批量改造">批量改造</h3><p>MyBatis 用 <code>foreach</code> 拼 IN 是最直接的改法：</p>
+<pre><code class="language-xml"><span class="hljs-tag">&lt;<span class="hljs-name">select</span> <span class="hljs-attr">id</span>=<span class="hljs-string">&quot;selectByDeviceIds&quot;</span> <span class="hljs-attr">resultType</span>=<span class="hljs-string">&quot;DeviceTelemetry&quot;</span>&gt;</span>
+    SELECT id, device_id, data_type, data_value, report_time
+    FROM t_device_telemetry
+    WHERE device_id IN
+    <span class="hljs-tag">&lt;<span class="hljs-name">foreach</span> <span class="hljs-attr">collection</span>=<span class="hljs-string">&quot;deviceIds&quot;</span> <span class="hljs-attr">item</span>=<span class="hljs-string">&quot;did&quot;</span> <span class="hljs-attr">open</span>=<span class="hljs-string">&quot;(&quot;</span> <span class="hljs-attr">separator</span>=<span class="hljs-string">&quot;,&quot;</span> <span class="hljs-attr">close</span>=<span class="hljs-string">&quot;)&quot;</span>&gt;</span>
+        #{did}
+    <span class="hljs-tag">&lt;/<span class="hljs-name">foreach</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">select</span>&gt;</span>
+</code></pre><p>Service 层配套改成「先查主列表、再一次性批量查明细、最后在内存里按 deviceId 分组回填」：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-type">List</span>&lt;DeviceDataVO&gt; <span class="hljs-title function_">list</span><span class="hljs-params">(DeviceDataQuery query)</span> {
+    <span class="hljs-type">List</span>&lt;DeviceDataVO&gt; <span class="hljs-variable">devices</span> <span class="hljs-operator">=</span> deviceDataMapper.selectPage(
+            query.getDeviceId(), query.getStatus(), query.getBegin(), query.getEnd());
+
+    <span class="hljs-keyword">if</span> (devices.isEmpty()) {
+        <span class="hljs-keyword">return</span> devices;
+    }
+    <span class="hljs-comment">// 1 次批量查询，替代 N 次单个查询</span>
+    <span class="hljs-type">List</span>&lt;Long&gt; <span class="hljs-variable">deviceIds</span> <span class="hljs-operator">=</span> devices.stream().map(DeviceDataVO::getId).toList();
+    <span class="hljs-type">List</span>&lt;DeviceTelemetryVO&gt; <span class="hljs-variable">allItems</span> <span class="hljs-operator">=</span> telemetryMapper.selectByDeviceIds(deviceIds);
+
+    <span class="hljs-type">Map</span>&lt;Long, List&lt;DeviceTelemetryVO&gt;&gt; <span class="hljs-variable">itemMap</span> <span class="hljs-operator">=</span>
+            allItems.stream().collect(Collectors.groupingBy(DeviceTelemetryVO::getDeviceId));
+    devices.forEach(d -&gt; d.setItems(itemMap.getOrDefault(d.getId(), List.of())));
+    <span class="hljs-keyword">return</span> devices;
+}
+</code></pre><p>注意 IN 列表别太长：MySQL 对 IN 是顺序扫描语义，超过几百个值收益下降，业务上每页 20 条完全没问题。真有大 IN 场景，按 500 一组 split 后多次查询再合并。</p>
+<p>压测看这轮效果：P99 从 2.6s 掉到 680ms，主要耗时变成「主查询 18ms + 批量明细 30ms」。但还是不算快，因为每页请求都直接打 MySQL——下一步上缓存。</p>
+<h2 id="优化三-redis-缓存-分布式锁防击穿">优化三：Redis 缓存 + 分布式锁防击穿</h2><h3 id="为什么需要缓存">为什么需要缓存</h3><p>设备数据查询有很强的「热点属性」：同一批设备每 5 秒上报一批遥测数据，值班同事的查询又集中在最近时段（最新遥测和在线状态变化少）。直接缓存接口结果，P99 可以压到 250ms 左右——但缓存有个经典坑：<strong>热点 key 过期瞬间，全部流量直穿 DB</strong>。</p>
+<p>我们白天峰值 QPS 2000+，一旦 key 过期，一个请求的 2 次查询乘以 2000 并发，DB 立刻被打穿，这就是「缓存击穿」。</p>
+<h3 id="缓存击穿的标准解法-互斥锁-双检">缓存击穿的标准解法：互斥锁 + 双检</h3><p>用 Redisson 的 <code>RLock</code> 做互斥重建，避免并发重建缓存：</p>
+<pre><code class="language-java"><span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">DeviceDataListCache</span> {
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">final</span> <span class="hljs-type">String</span> <span class="hljs-variable">CACHE_KEY</span> <span class="hljs-operator">=</span> <span class="hljs-string">&quot;device:data:list:%s:%s:%d:%d&quot;</span>;
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">final</span> <span class="hljs-type">long</span> <span class="hljs-variable">CACHE_TTL_MS</span> <span class="hljs-operator">=</span> <span class="hljs-number">5</span> * <span class="hljs-number">60</span> * <span class="hljs-number">1000L</span>;
+
+    <span class="hljs-meta">@Resource</span>
+    <span class="hljs-keyword">private</span> StringRedisTemplate redis;
+    <span class="hljs-meta">@Resource</span>
+    <span class="hljs-keyword">private</span> RedissonClient redisson;
+
+    <span class="hljs-keyword">public</span> <span class="hljs-type">List</span>&lt;DeviceDataVO&gt; <span class="hljs-title function_">get</span><span class="hljs-params">(DeviceDataQuery query)</span> {
+        <span class="hljs-type">String</span> <span class="hljs-variable">key</span> <span class="hljs-operator">=</span> buildKey(query);
+        <span class="hljs-comment">// 1. 先读缓存</span>
+        <span class="hljs-type">String</span> <span class="hljs-variable">json</span> <span class="hljs-operator">=</span> redis.opsForValue().get(key);
+        <span class="hljs-keyword">if</span> (json != <span class="hljs-literal">null</span>) {
+            <span class="hljs-keyword">return</span> JSON.parseArray(json, DeviceDataVO.class);
+        }
+        <span class="hljs-comment">// 2. 缓存没有，抢分布式锁，防止多个线程同时重建（击穿）</span>
+        <span class="hljs-type">String</span> <span class="hljs-variable">lockKey</span> <span class="hljs-operator">=</span> <span class="hljs-string">&quot;lock:&quot;</span> + key;
+        <span class="hljs-type">RLock</span> <span class="hljs-variable">lock</span> <span class="hljs-operator">=</span> redisson.getLock(lockKey);
+        <span class="hljs-type">boolean</span> <span class="hljs-variable">locked</span> <span class="hljs-operator">=</span> <span class="hljs-literal">false</span>;
+        <span class="hljs-keyword">try</span> {
+            locked = lock.tryLock(<span class="hljs-number">2</span>, <span class="hljs-number">10</span>, TimeUnit.SECONDS);
+            <span class="hljs-keyword">if</span> (!locked) {
+                Thread.sleep(<span class="hljs-number">50</span>); <span class="hljs-comment">// 拿不到锁的请求短暂等待后重试读缓存</span>
+                <span class="hljs-keyword">return</span> get(query);
+            }
+            <span class="hljs-comment">// 3. 双检：拿到锁后可能别的线程已经重建完了</span>
+            json = redis.opsForValue().get(key);
+            <span class="hljs-keyword">if</span> (json != <span class="hljs-literal">null</span>) {
+                <span class="hljs-keyword">return</span> JSON.parseArray(json, DeviceDataVO.class);
+            }
+            <span class="hljs-comment">// 4. 真正查库并回填缓存</span>
+            <span class="hljs-type">List</span>&lt;DeviceDataVO&gt; <span class="hljs-variable">devices</span> <span class="hljs-operator">=</span> queryFromDb(query);
+            redis.opsForValue().set(
+                    key, JSON.toJSONString(devices), CACHE_TTL_MS, TimeUnit.MILLISECONDS);
+            <span class="hljs-keyword">return</span> devices;
+        } <span class="hljs-keyword">catch</span> (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            <span class="hljs-keyword">return</span> queryFromDb(query); <span class="hljs-comment">// 兜底：直接查库，保证可用性</span>
+        } <span class="hljs-keyword">finally</span> {
+            <span class="hljs-keyword">if</span> (locked) {
+                lock.unlock();
+            }
+        }
+    }
+}
+</code></pre><blockquote>
+<p>注意三点：① 缓存和 DB 的一致性用 Cache Aside，设备数据入库时主动删缓存而不是更新缓存；② TTL 加随机抖动，避免大批 key 同时过期（缓存雪崩）；③ 分布式锁解决的是「单 key 热点被击穿」，流量侧还得靠限流兜底，见下文。</p>
+</blockquote>
+<h3 id="更新侧-删除缓存而非更新缓存">更新侧：删除缓存而非更新缓存</h3><p>设备数据入库后主动删 key，下次读时重建：</p>
+<pre><code class="language-java"><span class="hljs-meta">@Transactional</span>
+<span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">saveDeviceData</span><span class="hljs-params">(Long deviceId, List&lt;DeviceTelemetry&gt; telemetryList)</span> {
+    deviceDataMapper.insertBatch(deviceId, telemetryList);
+    <span class="hljs-comment">// 删除相关列表缓存</span>
+    <span class="hljs-type">Set</span>&lt;String&gt; <span class="hljs-variable">keys</span> <span class="hljs-operator">=</span> redis.keys(<span class="hljs-string">&quot;device:data:list:*&quot;</span>);
+    <span class="hljs-keyword">if</span> (!keys.isEmpty()) {
+        redis.delete(keys);
+    }
+}
+</code></pre><p><code>keys</code> 命令生产环境慎用（全量扫描），量大时换成缓存版本号或按 deviceId 维度删单个 key，这里只是示意图。</p>
+<h2 id="优化前后对比">优化前后对比</h2><table>
+<thead>
+<tr>
+<th>指标</th>
+<th>优化前</th>
+<th>索引优化后</th>
+<th>+ 批量后</th>
+<th>+ 缓存后</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>P99</td>
+<td>2610 ms</td>
+<td>1180 ms</td>
+<td>680 ms</td>
+<td>198 ms</td>
+</tr>
+<tr>
+<td>P95</td>
+<td>2340 ms</td>
+<td>1050 ms</td>
+<td>610 ms</td>
+<td>172 ms</td>
+</tr>
+<tr>
+<td>QPS</td>
+<td>118</td>
+<td>320</td>
+<td>540</td>
+<td>2100</td>
+</tr>
+<tr>
+<td>DB CPU</td>
+<td>~45%</td>
+<td>~28%</td>
+<td>~19%</td>
+<td>~6%</td>
+</tr>
+<tr>
+<td>慢查询/小时</td>
+<td>40+</td>
+<td>2</td>
+<td>0</td>
+<td>0</td>
+</tr>
+</tbody></table>
+<p>最终结果：P99 稳定在 200ms 以内，达标（平台要求 &lt;300ms），DB 压力降到原来的 1/7，压测 30 分钟无超时。</p>
+<h2 id="总结-一份可复用的性能优化-checklist">总结：一份可复用的性能优化 Checklist</h2><p>这次从 2s 到 200ms，本质是「先定位、再对症、后兜底」：</p>
+<ol>
+<li><strong>先量化再动手</strong>：压测拿到 P95/P99/QPS 基线，优化后才有对比依据。</li>
+<li><strong>定位优先级</strong>：慢查询日志（SQL 层）→ Arthas 火焰图（代码层）→ 链路追踪（跨服务层），三步就能把瓶颈钉死。</li>
+<li><strong>SQL 优先建索引</strong>：联合索引按最左前缀；高频小结果集考虑覆盖索引；<code>EXPLAIN</code> 里出现 <code>ALL</code> / <code>Using filesort</code> 就是警告信号。</li>
+<li><strong>消灭 N+1</strong>：MyBatis 用 IN 批量查 + 内存分组，注意 IN 上限。</li>
+<li><strong>缓存要防穿透/击穿/雪崩</strong>：互斥锁重建 + TTL 随机抖动 + 空值缓存（防穿透，本文未展开）。</li>
+<li><strong>兜底限流</strong>：缓存和 DB 之间永远留最后一道闸，Sentinel / Guava RateLimiter 都行。</li>
+<li><strong>留好观测</strong>：慢查询阈值调到 1s 并落库，火焰图和 trace 都要能随时开。</li>
+</ol>
+<p>性能优化没有银弹，但套路是可以复制的：<strong>数据说话 → 定位瓶颈 → 最小改动 → 验证对比</strong>。</p>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/mysql-slow-query.html"><span>← 上一篇</span><b>线上故障排查：一条慢查询引发的服务雪崩</b></a>
+    <a class="pn-btn next" href="/post/nginx.html"><span>下一篇 →</span><b>Nginx 实战：反向代理、负载均衡与静态资源</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

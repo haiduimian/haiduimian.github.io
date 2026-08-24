@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>找单独的数：一道题吃透 Java 位运算 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#题目-面试官只给了一分钟">题目：面试官只给了一分钟</a></li><li class="toc-l2"><a href="#第一版-hashmap-计数-能过但不够漂亮">第一版：HashMap 计数，能过但不够漂亮</a></li><li class="toc-l2"><a href="#核心武器-异或">核心武器：异或</a></li><li class="toc-l2"><a href="#进阶-其他数出现三次-逐位统计-3">进阶：其他数出现三次，逐位统计 %3</a></li><li class="toc-l2"><a href="#位运算技巧汇总表">位运算技巧汇总表</a></li><li class="toc-l2"><a href="#面试延伸-统计二进制中-1-的个数">面试延伸：统计二进制中 1 的个数</a></li><li class="toc-l2"><a href="#一道题-一串收获">一道题，一串收获</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">📝 学习笔记</span></p>
+      <h1>找单独的数：一道题吃透 Java 位运算</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2025-10-15</span>
+        <span class="meta-read">☕ 预计阅读 8 分钟</span>
+        <span class="meta-tags"><code>#算法</code> <code>#位运算</code> <code>#Java</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="题目-面试官只给了一分钟">题目：面试官只给了一分钟</h2><p>一道经典的面试题：</p>
+<blockquote>
+<p>给定一个<strong>非空</strong>整数数组 <code>nums</code>，其中恰好有一个元素只出现一次，其余所有元素均出现<strong>两次</strong>。找出那个只出现一次的元素。要求时间 O(n)、额外空间 O(1)。</p>
+</blockquote>
+<p>稍微变形一下：</p>
+<blockquote>
+<p>其余所有元素均出现<strong>三次</strong>，找出唯一出现一次的元素。</p>
+</blockquote>
+<p>别看题目简单，它几乎能一次性考到：哈希表、位运算、二进制思维。这篇文章从暴力解讲到位运算进阶，顺便把面试里常用的位运算技巧全部盘一遍。</p>
+<h2 id="第一版-hashmap-计数-能过但不够漂亮">第一版：HashMap 计数，能过但不够漂亮</h2><p>拿到题目第一反应是计数：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-type">int</span> <span class="hljs-title function_">singleNumber</span><span class="hljs-params">(<span class="hljs-type">int</span>[] nums)</span> {
+    <span class="hljs-type">Map</span>&lt;Integer, Integer&gt; <span class="hljs-variable">count</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">HashMap</span>&lt;&gt;();
+    <span class="hljs-keyword">for</span> (<span class="hljs-type">int</span> n : nums) {
+        count.put(n, count.getOrDefault(n, <span class="hljs-number">0</span>) + <span class="hljs-number">1</span>);
+    }
+    <span class="hljs-keyword">for</span> (Map.Entry&lt;Integer, Integer&gt; e : count.entrySet()) {
+        <span class="hljs-keyword">if</span> (e.getValue() == <span class="hljs-number">1</span>) {
+            <span class="hljs-keyword">return</span> e.getKey();
+        }
+    }
+    <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">IllegalArgumentException</span>(<span class="hljs-string">&quot;输入不合法&quot;</span>);
+}
+</code></pre><p>时间 O(n) 满足，但空间 O(n)——HashMap 要存一半以上的元素。面试官问：&quot;能不能把空间压到 O(1)？&quot;</p>
+<p>这就得请出位运算了。</p>
+<h2 id="核心武器-异或">核心武器：异或</h2><p>先复习三条异或性质（Java 里是 <code>^</code>）：</p>
+<table>
+<thead>
+<tr>
+<th>性质</th>
+<th>表达式</th>
+<th>直觉</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>归零律</td>
+<td><code>a ^ a = 0</code></td>
+<td>自己异或自己，所有位抵消</td>
+</tr>
+<tr>
+<td>恒等律</td>
+<td><code>a ^ 0 = a</code></td>
+<td>异或 0 保持原值</td>
+</tr>
+<tr>
+<td>交换律/结合律</td>
+<td><code>a ^ b ^ c = a ^ c ^ b</code></td>
+<td>顺序无关，随便换</td>
+</tr>
+</tbody></table>
+<p><strong>核心思想</strong>：把数组里所有数全部异或一遍。出现两次的数成对抵消变 0，最后剩下的就是只出现一次的那个数。</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-type">int</span> <span class="hljs-title function_">singleNumber</span><span class="hljs-params">(<span class="hljs-type">int</span>[] nums)</span> {
+    <span class="hljs-type">int</span> <span class="hljs-variable">result</span> <span class="hljs-operator">=</span> <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">for</span> (<span class="hljs-type">int</span> n : nums) {
+        result ^= n;   <span class="hljs-comment">// 全部异或，成对的归零</span>
+    }
+    <span class="hljs-keyword">return</span> result;     <span class="hljs-comment">// 只剩唯一没成对的</span>
+}
+</code></pre><p>验证一下：<code>nums = [4, 1, 2, 1, 2]</code>：</p>
+<pre><code class="language-text">4 ^ 1 ^ 2 ^ 1 ^ 2
+= 4 ^ (1 ^ 1) ^ (2 ^ 2)   // 交换律，把成对的放一起
+= 4 ^ 0 ^ 0
+= 4
+</code></pre><p>时间 O(n)、空间 O(1)，几行代码解决。面试官一般会满意地点头，然后抛出第二个问题：&quot;如果其他数都出现<strong>三次</strong>呢？异或还行不行？&quot;</p>
+<p>试一下：<code>[3, 3, 3, 5]</code>，<code>3 ^ 3 ^ 3 ^ 5 = 3 ^ 5 = 6</code>，答案错了。因为异或抵消只对&quot;偶数次&quot;有效。</p>
+<h2 id="进阶-其他数出现三次-逐位统计-3">进阶：其他数出现三次，逐位统计 %3</h2><p>换个思路：不看整个数，看<strong>每一位</strong>。</p>
+<p>对数组里的每个数，统计每个二进制位上 1 出现的次数。如果某一位的 1 出现了 <code>3k + 1</code> 次，说明唯一那个数在这一位上是 1；如果是 <code>3k</code> 次，说明怪数这一位是 0。</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-type">int</span> <span class="hljs-title function_">singleNumber2</span><span class="hljs-params">(<span class="hljs-type">int</span>[] nums)</span> {
+    <span class="hljs-type">int</span> <span class="hljs-variable">result</span> <span class="hljs-operator">=</span> <span class="hljs-number">0</span>;
+    <span class="hljs-comment">// int 是 32 位，逐位处理</span>
+    <span class="hljs-keyword">for</span> (<span class="hljs-type">int</span> <span class="hljs-variable">i</span> <span class="hljs-operator">=</span> <span class="hljs-number">0</span>; i &lt; <span class="hljs-number">32</span>; i++) {
+        <span class="hljs-type">int</span> <span class="hljs-variable">bitCount</span> <span class="hljs-operator">=</span> <span class="hljs-number">0</span>;
+        <span class="hljs-keyword">for</span> (<span class="hljs-type">int</span> n : nums) {
+            bitCount += (n &gt;&gt; i) &amp; <span class="hljs-number">1</span>;   <span class="hljs-comment">// 取出第 i 位（0 或 1）累加</span>
+        }
+        result |= (bitCount % <span class="hljs-number">3</span>) &lt;&lt; i;  <span class="hljs-comment">// 余 1 说明怪数该位为 1</span>
+    }
+    <span class="hljs-keyword">return</span> result;
+}
+</code></pre><p>以 <code>nums = [3, 3, 3, 5]</code> 为例，只看后三位：</p>
+<table>
+<thead>
+<tr>
+<th>数（二进制）</th>
+<th>bit2</th>
+<th>bit1</th>
+<th>bit0</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>3 = 011</td>
+<td>0</td>
+<td>1</td>
+<td>1</td>
+</tr>
+<tr>
+<td>3 = 011</td>
+<td>0</td>
+<td>1</td>
+<td>1</td>
+</tr>
+<tr>
+<td>3 = 011</td>
+<td>0</td>
+<td>1</td>
+<td>1</td>
+</tr>
+<tr>
+<td>5 = 101</td>
+<td>1</td>
+<td>0</td>
+<td>1</td>
+</tr>
+<tr>
+<td>1 的个数</td>
+<td>1</td>
+<td>3</td>
+<td>4</td>
+</tr>
+<tr>
+<td>% 3</td>
+<td><strong>1</strong></td>
+<td>0</td>
+<td><strong>1</strong></td>
+</tr>
+</tbody></table>
+<p>结果 bits = 101 = 5，正确。这个算法的复杂度是 O(32n) = O(n)，空间 O(1)。</p>
+<blockquote>
+<p>面试加分项：推广到&quot;其他数都出现 k 次&quot;，把 <code>% 3</code> 换成 <code>% k</code> 即可，本质是<strong>用二进制模拟 k 进制计数器</strong>。更高级的写法是用 <code>ones</code>、<code>twos</code> 两个变量做状态转移，硬核面试官可能会追问，这里不展开。</p>
+</blockquote>
+<h2 id="位运算技巧汇总表">位运算技巧汇总表</h2><p>题目做完，把日常最高频的位运算技巧整理成表（n 为 int，k 为位数）：</p>
+<table>
+<thead>
+<tr>
+<th>需求</th>
+<th>表达式</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>判断奇偶</td>
+<td><code>(n &amp; 1) == 1</code></td>
+<td>比 <code>n % 2</code> 快，只看最低位</td>
+</tr>
+<tr>
+<td>判断 2 的幂</td>
+<td><code>(n &amp; (n - 1)) == 0</code></td>
+<td>2 的幂二进制只有一个 1</td>
+</tr>
+<tr>
+<td>交换两个数</td>
+<td><code>a ^= b; b ^= a; a ^= b;</code></td>
+<td>不用临时变量，面试炫技但实际别这么写</td>
+</tr>
+<tr>
+<td>取低 k 位</td>
+<td><code>n &amp; ((1 &lt;&lt; k) - 1)</code></td>
+<td>掩码操作</td>
+</tr>
+<tr>
+<td>清零最低位的 1</td>
+<td><code>n &amp; (n - 1)</code></td>
+<td>统计 1 个数的核心</td>
+</tr>
+<tr>
+<td>取最低位的 1</td>
+<td><code>n &amp; (-n)</code></td>
+<td>树状数组 lowbit 的由来</td>
+</tr>
+<tr>
+<td>对 2 的幂取模</td>
+<td><code>n &amp; (k - 1)</code></td>
+<td>k 必须是 2 的幂，如 <code>n % 16</code> → <code>n &amp; 15</code></td>
+</tr>
+<tr>
+<td>判断正负</td>
+<td><code>(n &gt;&gt; 31) != 0</code></td>
+<td>负数最高位（符号位）是 1</td>
+</tr>
+</tbody></table>
+<pre><code class="language-java"><span class="hljs-comment">// 实际执行验证一下</span>
+<span class="hljs-type">int</span> <span class="hljs-variable">n</span> <span class="hljs-operator">=</span> <span class="hljs-number">12</span>;                       <span class="hljs-comment">// 1100</span>
+System.out.println(n &amp; -n);       <span class="hljs-comment">// 4    -&gt; 最低位 1 的权值</span>
+System.out.println(n &amp; (n - <span class="hljs-number">1</span>));  <span class="hljs-comment">// 8    -&gt; 1100 &amp; 1011 = 1000，清掉了最低位的 1</span>
+</code></pre><h2 id="面试延伸-统计二进制中-1-的个数">面试延伸：统计二进制中 1 的个数</h2><p>题目做完，再来一道面试加试题：<strong>统计整数二进制里有多少个 1</strong>。</p>
+<p>最直观——逐位检查：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-type">int</span> <span class="hljs-title function_">countOnes</span><span class="hljs-params">(<span class="hljs-type">int</span> n)</span> {
+    <span class="hljs-type">int</span> <span class="hljs-variable">count</span> <span class="hljs-operator">=</span> <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">while</span> (n != <span class="hljs-number">0</span>) {
+        count += (n &amp; <span class="hljs-number">1</span>);  <span class="hljs-comment">// 看最低位</span>
+        n &gt;&gt;&gt;= <span class="hljs-number">1</span>;          <span class="hljs-comment">// 无符号右移</span>
+    }
+    <span class="hljs-keyword">return</span> count;
+}
+</code></pre><p>更快——用 <code>n &amp; (n - 1)</code> 每次消掉一个 1，循环次数 = 1 的个数：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-type">int</span> <span class="hljs-title function_">countOnes</span><span class="hljs-params">(<span class="hljs-type">int</span> n)</span> {
+    <span class="hljs-type">int</span> <span class="hljs-variable">count</span> <span class="hljs-operator">=</span> <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">while</span> (n != <span class="hljs-number">0</span>) {
+        n = n &amp; (n - <span class="hljs-number">1</span>);   <span class="hljs-comment">// 干掉最低位的 1</span>
+        count++;
+    }
+    <span class="hljs-keyword">return</span> count;
+}
+</code></pre><p>n = 12（1100）的话：第一次变成 1000，第二次变成 0，循环两次，答案 2。Java 里其实有现成的 <code>Integer.bitCount(n)</code>，面试时可以提一句&quot;生产环境直接用 JDK 的 <code>Integer.bitCount</code>&quot;，体现工程意识。</p>
+<h2 id="一道题-一串收获">一道题，一串收获</h2><p>回头再看看这道&quot;找单独的数&quot;：</p>
+<table>
+<thead>
+<tr>
+<th>版本</th>
+<th>解法</th>
+<th>复杂度</th>
+<th>考点</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>出现两次</td>
+<td>异或全消</td>
+<td>O(n) / O(1)</td>
+<td>异或性质</td>
+</tr>
+<tr>
+<td>出现三次</td>
+<td>逐位统计 %3</td>
+<td>O(n) / O(1)</td>
+<td>位运算 + 计数思想</td>
+</tr>
+<tr>
+<td>计数版</td>
+<td>HashMap</td>
+<td>O(n) / O(n)</td>
+<td>基础实现，用来对比</td>
+</tr>
+</tbody></table>
+<p>位运算的难点从来不是运算符本身，而是<strong>把问题翻译成二进制视角</strong>：出现两次 → 异或抵消；出现三次 → 逐位计数；求 1 个数 → lowbit 清零。把一个&quot;数&quot;看成 32 个独立开关，很多难题会一下子变得清晰起来。</p>
+<p>如果觉得有用，下一篇讲讲 Java 并发里 <code>volatile</code> 和锁的内存语义——位运算聊完了，正好衔接上。</p>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/docker-java.html"><span>← 上一篇</span><b>Docker 部署 Spring Boot 应用：从 Dockerfile 到 Compose</b></a>
+    <a class="pn-btn next" href="/post/device-collection.html"><span>下一篇 →</span><b>工业设备数据采集平台：从 PLC 到数据库的整条链路</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

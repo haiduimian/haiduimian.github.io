@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nginx 实战：反向代理、负载均衡与静态资源 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#nginx-是什么-为什么-java-项目绕不开它">Nginx 是什么，为什么 Java 项目绕不开它</a></li><li class="toc-l2"><a href="#静态站点配置">静态站点配置</a></li><li class="toc-l2"><a href="#location-匹配规则-背下这张表">location 匹配规则（背下这张表）</a></li><li class="toc-l2"><a href="#反向代理-spring-boot">反向代理 Spring Boot</a></li><li class="toc-l2"><a href="#upstream-负载均衡">upstream 负载均衡</a></li><li class="toc-l2"><a href="#开启-https">开启 HTTPS</a></li><li class="toc-l2"><a href="#常见坑-timeout-上传大小-其他">常见坑：timeout、上传大小、其他</a></li><li class="toc-l3"><a href="#1-代理超时-proxy_timeout-三件套">1. 代理超时（proxy_timeout 三件套）</a></li><li class="toc-l3"><a href="#2-上传大小限制-client_max_body_size">2. 上传大小限制（client_max_body_size）</a></li><li class="toc-l3"><a href="#3-sse-流式接口被缓冲">3. SSE / 流式接口被缓冲</a></li><li class="toc-l3"><a href="#4-gzip-忘了开-带宽白烧">4. gzip 忘了开，带宽白烧</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">⚙️ 工程实践</span></p>
+      <h1>Nginx 实战：反向代理、负载均衡与静态资源</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2026-01-20</span>
+        <span class="meta-read">☕ 预计阅读 15 分钟</span>
+        <span class="meta-tags"><code>#Nginx</code> <code>#反向代理</code> <code>#负载均衡</code> <code>#HTTPS</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="nginx-是什么-为什么-java-项目绕不开它">Nginx 是什么，为什么 Java 项目绕不开它</h2><p>Nginx 是一个高性能的 Web 服务器 / 反向代理 / 负载均衡器。和 Tomcat（应用服务器，负责跑 Java 业务代码）不同，Nginx 站在<strong>架构的最外层</strong>，负责把流量接进来再分发：</p>
+<pre><code class="language-text">用户请求
+   │
+   ▼
+Nginx（入口：静态资源、反向代理、负载均衡、TLS 终结、限流）
+   ├──▶ 静态文件（html/js/css 直接返回）
+   ├──▶ Spring Boot 实例 1 (10.0.0.11:8080)
+   ├──▶ Spring Boot 实例 2 (10.0.0.12:8080)
+   └──▶ Spring Boot 实例 3 (10.0.0.13:8080)
+</code></pre><p>它在 Java 项目里的典型用途，对应的就是本文的四个部分：</p>
+<table>
+<thead>
+<tr>
+<th>用途</th>
+<th>典型场景</th>
+<th>本文章节</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>静态资源服务</td>
+<td>前端站点、图片、打包后的 SPA</td>
+<td>静态站点配置</td>
+</tr>
+<tr>
+<td>反向代理</td>
+<td>隐藏后端端口、统一入口 80/443 → 8080</td>
+<td>反向代理 Spring Boot</td>
+</tr>
+<tr>
+<td>负载均衡</td>
+<td>多实例部署、灰度、容灾</td>
+<td>upstream 负载均衡</td>
+</tr>
+<tr>
+<td>TLS 终结</td>
+<td>统一上 HTTPS、证书集中管理</td>
+<td>开启 HTTPS</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>类比理解：Tomcat 负责&quot;干活&quot;（跑 Java 业务），Nginx 负责&quot;看门&quot;（接客、分发、挡流量）。现实中我们常把 Nginx 放在 Tomcat 前面，外面只暴露 80/443。</p>
+</blockquote>
+<h2 id="静态站点配置">静态站点配置</h2><p>先来最基础的：给一个静态博客/前端站点做配置（本站就是这种结构——生成好的 HTML，Nginx 直接吐出去）：</p>
+<pre><code class="language-nginx"><span class="hljs-section">server</span> {
+    <span class="hljs-attribute">listen</span> <span class="hljs-number">80</span>;
+    <span class="hljs-attribute">server_name</span> blog.example.com;
+
+    <span class="hljs-attribute">root</span> /var/www/blog;
+    <span class="hljs-attribute">index</span> index.html;
+
+    <span class="hljs-section">location</span> / {
+        <span class="hljs-comment"># 先找文件，再找目录索引，都没有就 404</span>
+        <span class="hljs-attribute">try_files</span> <span class="hljs-variable">$uri</span> <span class="hljs-variable">$uri</span>/ =<span class="hljs-number">404</span>;
+    }
+
+    <span class="hljs-comment"># 静态资源长缓存：带 hash 的文件名可以 immutable</span>
+    <span class="hljs-section">location</span> <span class="hljs-regexp">~* \.(js|css|png|jpg|jpeg|gif|svg|webp|woff2?)$</span> {
+        <span class="hljs-attribute">expires</span> <span class="hljs-number">30d</span>;
+        <span class="hljs-attribute">add_header</span> Cache-Control <span class="hljs-string">&quot;public, max-age=2592000, immutable&quot;</span>;
+        <span class="hljs-attribute">access_log</span> <span class="hljs-literal">off</span>;          <span class="hljs-comment"># 静态资源不刷访问日志，省磁盘</span>
+    }
+}
+</code></pre><p>两个配置点值得解释：</p>
+<ul>
+<li><code>root</code> vs <code>alias</code>：<code>location /</code> 下用 <code>root /var/www/blog</code> 会把 URL 路径拼到 root 后面（<code>/foo.html</code> → <code>/var/www/blog/foo.html</code>）；<code>alias</code> 则会替换掉匹配的前缀，一般 <code>location</code> 精确匹配时才用；</li>
+<li><code>try_files $uri $uri/ =404</code>：先尝试按原路径找文件，找不到试试当成目录，都没有就 404。SPA 项目常把最后一项换成 <code>index.html</code> 做前端路由回退。</li>
+</ul>
+<blockquote>
+<p>改完配置先 <code>nginx -t</code> 检查语法，再 <code>nginx -s reload</code> 平滑重载——reload 不会中断现有连接，生产上可以放心用。</p>
+</blockquote>
+<h2 id="location-匹配规则-背下这张表">location 匹配规则（背下这张表）</h2><p>Nginx 的 <code>location</code> 匹配是很多新手翻车的地方，规则其实就三条：</p>
+<table>
+<thead>
+<tr>
+<th>写法</th>
+<th>含义</th>
+<th>优先级</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>location = /path</code></td>
+<td>精确匹配</td>
+<td>最高，命中即止</td>
+</tr>
+<tr>
+<td><code>location ^~ /path</code></td>
+<td>前缀匹配，且命中后<strong>不再查正则</strong></td>
+<td>次之</td>
+</tr>
+<tr>
+<td><code>location /path</code></td>
+<td>普通前缀匹配，取最长者</td>
+<td>再次</td>
+</tr>
+<tr>
+<td><code>location ~ regex</code></td>
+<td>正则匹配（区分大小写）</td>
+<td>最后，按书写顺序</td>
+</tr>
+<tr>
+<td><code>location ~* regex</code></td>
+<td>正则匹配（不区分大小写）</td>
+<td>最后，按书写顺序</td>
+</tr>
+</tbody></table>
+<pre><code class="language-nginx"><span class="hljs-comment"># 示例：/api 走代理，其余走静态</span>
+<span class="hljs-section">location</span> /api/ {
+    <span class="hljs-attribute">proxy_pass</span> http://app_backend;
+}
+
+<span class="hljs-comment"># 精确匹配健康检查路径，避免被上面 /api 规则误伤</span>
+<span class="hljs-section">location</span> = /api/health {
+    <span class="hljs-attribute">proxy_pass</span> http://app_backend;
+    <span class="hljs-attribute">access_log</span> <span class="hljs-literal">off</span>;
+}
+</code></pre><blockquote>
+<p>一句话记忆：<strong>精确 &gt; 前缀（^~ 阻断正则）&gt; 最长前缀 &gt; 正则（按顺序）</strong>。实际使用中最常见的坑是&quot;正则规则写在普通前缀前面，匹配到了却被前缀规则拦住&quot;，所以正则尽量放最后。</p>
+</blockquote>
+<h2 id="反向代理-spring-boot">反向代理 Spring Boot</h2><p>Spring Boot 默认监听 8080，我们不想让用户直接看到 8080，也不想让业务代码感知 IP 变化，于是用 Nginx 代理：</p>
+<pre><code class="language-nginx"><span class="hljs-section">server</span> {
+    <span class="hljs-attribute">listen</span> <span class="hljs-number">80</span>;
+    <span class="hljs-attribute">server_name</span> api.example.com;
+
+    <span class="hljs-section">location</span> / {
+        <span class="hljs-attribute">proxy_pass</span> http://127.0.0.1:8080;
+
+        <span class="hljs-comment"># 转发协议头：后端才能拿到真实客户端信息</span>
+        <span class="hljs-attribute">proxy_set_header</span> Host <span class="hljs-variable">$host</span>;
+        <span class="hljs-attribute">proxy_set_header</span> X-Real-IP <span class="hljs-variable">$remote_addr</span>;
+        <span class="hljs-attribute">proxy_set_header</span> X-Forwarded-For <span class="hljs-variable">$proxy_add_x_forwarded_for</span>;
+        <span class="hljs-attribute">proxy_set_header</span> X-Forwarded-Proto <span class="hljs-variable">$scheme</span>;
+    }
+}
+</code></pre><p>转发头的作用不能被忽略，没有它们后端拿到的全是 Nginx 的地址：</p>
+<table>
+<thead>
+<tr>
+<th>请求头</th>
+<th>含义</th>
+<th>后端不设置会怎样</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>X-Real-IP</code></td>
+<td>客户端真实 IP</td>
+<td>日志里全是 Nginx 的 IP</td>
+</tr>
+<tr>
+<td><code>X-Forwarded-For</code></td>
+<td>代理链路 IP 列表</td>
+<td>审计、封禁无从谈起</td>
+</tr>
+<tr>
+<td><code>X-Forwarded-Proto</code></td>
+<td>原始协议 http/https</td>
+<td>重定向生成 http，HTTPS 跳转死循环</td>
+</tr>
+<tr>
+<td><code>Host</code></td>
+<td>原始域名</td>
+<td>虚拟主机、多域名全部错乱</td>
+</tr>
+</tbody></table>
+<p>Spring Boot 端也必须配合——默认情况下它<strong>忽略</strong>这些转发头（防伪造）。在 <code>application.yml</code> 里打开：</p>
+<pre><code class="language-yaml"><span class="hljs-attr">server:</span>
+  <span class="hljs-attr">port:</span> <span class="hljs-number">8080</span>
+  <span class="hljs-attr">forward-headers-strategy:</span> <span class="hljs-string">framework</span>
+</code></pre><blockquote>
+<p>血泪教训：没开 <code>forward-headers-strategy</code> 时，<code>request.getRemoteAddr()</code> 永远拿不到用户真实 IP，Spring Security 的 HTTPS 强制检查也会因为拿不到 <code>X-Forwarded-Proto</code> 而把请求误判为 http 直接重定向成死循环。上了代理，转发头和这个配置必须成对出现。</p>
+</blockquote>
+<h2 id="upstream-负载均衡">upstream 负载均衡</h2><p>多实例部署时用 <code>upstream</code> 定义后端集群，<code>proxy_pass</code> 指向集群名：</p>
+<pre><code class="language-nginx"><span class="hljs-section">upstream</span> app_backend {
+    <span class="hljs-comment"># 默认就是轮询；可选 least_conn / ip_hash</span>
+    least_conn;
+
+    <span class="hljs-comment"># weight 越大分配越多；max_fails + fail_timeout 是 passive 健康检查</span>
+    <span class="hljs-attribute">server</span> <span class="hljs-number">10.0.0.11:8080</span> weight=<span class="hljs-number">2</span> max_fails=<span class="hljs-number">3</span> fail_timeout=<span class="hljs-number">30s</span>;
+    <span class="hljs-attribute">server</span> <span class="hljs-number">10.0.0.12:8080</span> weight=<span class="hljs-number">1</span>;
+    <span class="hljs-attribute">server</span> <span class="hljs-number">10.0.0.13:8080</span> backup;      <span class="hljs-comment"># 备机：前两台都挂才启用</span>
+
+    <span class="hljs-attribute">keepalive</span> <span class="hljs-number">32</span>;                       <span class="hljs-comment"># 复用后端连接，减少握手开销</span>
+}
+
+<span class="hljs-section">server</span> {
+    <span class="hljs-attribute">listen</span> <span class="hljs-number">80</span>;
+    <span class="hljs-attribute">server_name</span> api.example.com;
+
+    <span class="hljs-section">location</span> / {
+        <span class="hljs-attribute">proxy_pass</span> http://app_backend;
+        <span class="hljs-attribute">proxy_http_version</span> <span class="hljs-number">1</span>.<span class="hljs-number">1</span>;         <span class="hljs-comment"># 配合 keepalive 必须开</span>
+        <span class="hljs-attribute">proxy_set_header</span> Connection <span class="hljs-string">&quot;&quot;</span>;
+    }
+}
+</code></pre><p>分配策略对比：</p>
+<table>
+<thead>
+<tr>
+<th>策略</th>
+<th>写法</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>轮询</td>
+<td>默认</td>
+<td>各实例性能均衡</td>
+</tr>
+<tr>
+<td>加权轮询</td>
+<td><code>weight=2</code></td>
+<td>新旧机器混跑、按机器性能分配</td>
+</tr>
+<tr>
+<td>ip_hash</td>
+<td><code>ip_hash;</code></td>
+<td>需要会话保持（用户固定打到同一台）</td>
+</tr>
+<tr>
+<td>最少连接</td>
+<td><code>least_conn;</code></td>
+<td>请求耗时差异大</td>
+</tr>
+<tr>
+<td>备机</td>
+<td><code>backup</code></td>
+<td>主动降级、容灾</td>
+</tr>
+</tbody></table>
+<p>一个澄清：OSS 版 Nginx 的 <code>max_fails</code>/<code>fail_timeout</code> 属于 <strong>passive（被动）健康检查</strong>——只有请求失败才摘除节点；没有免费的主动探活（那是 Nginx Plus 或第三方模块的能力）。简单场景下被动检查够用，要主动检查可以用 consul 动态更新 upstream，或者让 Spring Boot 挂掉时直接 <code>exit 1</code> 让容器重启。</p>
+<h2 id="开启-https">开启 HTTPS</h2><p>先有证书。最省事的是 Let&#39;s Encrypt + certbot，一条命令自动签发并改好 Nginx 配置：</p>
+<pre><code class="language-bash"><span class="hljs-built_in">sudo</span> certbot --nginx -d api.example.com
+</code></pre><p>手动配置的话，核心就是 <code>ssl</code> 监听 + 证书路径 + HTTP 跳转三件套：</p>
+<pre><code class="language-nginx"><span class="hljs-comment"># HTTPS 服务</span>
+<span class="hljs-section">server</span> {
+    <span class="hljs-attribute">listen</span> <span class="hljs-number">443</span> ssl;
+    <span class="hljs-attribute">http2</span> <span class="hljs-literal">on</span>;
+    <span class="hljs-attribute">server_name</span> api.example.com;
+
+    <span class="hljs-attribute">ssl_certificate</span>     /etc/letsencrypt/live/api.example.com/fullchain.pem;
+    <span class="hljs-attribute">ssl_certificate_key</span> /etc/letsencrypt/live/api.example.com/privkey.pem;
+
+    <span class="hljs-attribute">ssl_protocols</span> TLSv1.<span class="hljs-number">2</span> TLSv1.<span class="hljs-number">3</span>;              <span class="hljs-comment"># 禁用老协议</span>
+    <span class="hljs-attribute">ssl_ciphers</span> HIGH:!aNULL:!MD5;
+    <span class="hljs-attribute">ssl_session_cache</span> shared:SSL:<span class="hljs-number">10m</span>;
+    <span class="hljs-attribute">ssl_session_timeout</span> <span class="hljs-number">1d</span>;
+
+    <span class="hljs-section">location</span> / {
+        <span class="hljs-attribute">proxy_pass</span> http://app_backend;
+        <span class="hljs-attribute">proxy_set_header</span> Host <span class="hljs-variable">$host</span>;
+        <span class="hljs-attribute">proxy_set_header</span> X-Forwarded-For <span class="hljs-variable">$proxy_add_x_forwarded_for</span>;
+        <span class="hljs-attribute">proxy_set_header</span> X-Forwarded-Proto https;   <span class="hljs-comment"># 明确告诉后端是 https</span>
+    }
+}
+
+<span class="hljs-comment"># HTTP 全部 301 跳转 HTTPS</span>
+<span class="hljs-section">server</span> {
+    <span class="hljs-attribute">listen</span> <span class="hljs-number">80</span>;
+    <span class="hljs-attribute">server_name</span> api.example.com;
+    <span class="hljs-attribute">return</span> <span class="hljs-number">301</span> https://<span class="hljs-variable">$host</span><span class="hljs-variable">$request_uri</span>;
+}
+</code></pre><p>两个注意点：</p>
+<ul>
+<li>证书过期是 HTTPS 事故的头号来源，certbot 记得配 <code>systemctl enable certbot.timer</code> 自动续期；</li>
+<li>想彻底一点可以加 HSTS 头（<code>add_header Strict-Transport-Security &quot;max-age=31536000; includeSubDomains&quot;</code>），但<strong>先确认全站已经是 HTTPS</strong>，否则 HSTS 会让用户无法降级访问。</li>
+</ul>
+<h2 id="常见坑-timeout-上传大小-其他">常见坑：timeout、上传大小、其他</h2><p>最后列几个生产里天天遇到的坑：</p>
+<h3 id="1-代理超时-proxy_timeout-三件套">1. 代理超时（proxy_timeout 三件套）</h3><p>Nginx 默认 <code>proxy_read_timeout</code> 是 60 秒，<strong>超过 60 秒没收到后端响应就 504</strong>。导出报表、跑查询这类慢接口很容易中招：</p>
+<pre><code class="language-nginx"><span class="hljs-section">location</span> / {
+    <span class="hljs-attribute">proxy_pass</span> http://app_backend;
+    <span class="hljs-attribute">proxy_connect_timeout</span> <span class="hljs-number">5s</span>;      <span class="hljs-comment"># 建立连接超时，短一点</span>
+    <span class="hljs-attribute">proxy_read_timeout</span> <span class="hljs-number">120s</span>;       <span class="hljs-comment"># 读响应超时，按业务调整</span>
+    <span class="hljs-attribute">proxy_send_timeout</span> <span class="hljs-number">120s</span>;       <span class="hljs-comment"># 发请求超时</span>
+}
+</code></pre><blockquote>
+<p>治本思路：真正慢的任务（分钟级报表）别让 HTTP 请求一直挂着，改成&quot;提交任务 → 轮询/回调拿结果&quot;的异步模式，一来 Nginx 不用调大超时，二来用户体验更好。</p>
+</blockquote>
+<h3 id="2-上传大小限制-client_max_body_size">2. 上传大小限制（client_max_body_size）</h3><p>Nginx 默认只允许 1MB 的请求体，上传文件超过直接 <code>413 Request Entity Too Large</code>：</p>
+<pre><code class="language-nginx"><span class="hljs-attribute">client_max_body_size</span> <span class="hljs-number">50m</span>;      <span class="hljs-comment"># 放在 server 或 location 中</span>
+</code></pre><p>Spring Boot 侧还要同步放开：</p>
+<pre><code class="language-yaml"><span class="hljs-attr">spring:</span>
+  <span class="hljs-attr">servlet:</span>
+    <span class="hljs-attr">multipart:</span>
+      <span class="hljs-attr">max-file-size:</span> <span class="hljs-string">50MB</span>
+      <span class="hljs-attr">max-request-size:</span> <span class="hljs-string">60MB</span>
+</code></pre><blockquote>
+<p>调大之前先想清楚有没有必要：大文件上传更推荐走对象存储（OSS/MinIO），应用只拿 URL，别把流量全压 Nginx 上。</p>
+</blockquote>
+<h3 id="3-sse-流式接口被缓冲">3. SSE / 流式接口被缓冲</h3><p>Spring AI 这类流式输出（SSE）经过 Nginx 会被默认缓冲，导致客户端看到的是&quot;攒一批吐一批&quot;而不是逐 token 打印。关掉缓冲：</p>
+<pre><code class="language-nginx"><span class="hljs-section">location</span> /api/stream {
+    <span class="hljs-attribute">proxy_pass</span> http://app_backend;
+    <span class="hljs-attribute">proxy_buffering</span> <span class="hljs-literal">off</span>;
+    <span class="hljs-attribute">proxy_read_timeout</span> <span class="hljs-number">3600s</span>;      <span class="hljs-comment"># 长连接按业务设置</span>
+    <span class="hljs-attribute">proxy_set_header</span> Connection <span class="hljs-string">&quot;&quot;</span>;
+    <span class="hljs-attribute">proxy_http_version</span> <span class="hljs-number">1</span>.<span class="hljs-number">1</span>;
+}
+
+<span class="hljs-comment"># WebSocket 额外需要升级头</span>
+<span class="hljs-section">location</span> /ws/ {
+    <span class="hljs-attribute">proxy_pass</span> http://app_backend;
+    <span class="hljs-attribute">proxy_http_version</span> <span class="hljs-number">1</span>.<span class="hljs-number">1</span>;
+    <span class="hljs-attribute">proxy_set_header</span> Upgrade <span class="hljs-variable">$http_upgrade</span>;
+    <span class="hljs-attribute">proxy_set_header</span> Connection <span class="hljs-string">&quot;upgrade&quot;</span>;
+}
+</code></pre><h3 id="4-gzip-忘了开-带宽白烧">4. gzip 忘了开，带宽白烧</h3><pre><code class="language-nginx"><span class="hljs-attribute">gzip</span> <span class="hljs-literal">on</span>;
+<span class="hljs-attribute">gzip_min_length</span> <span class="hljs-number">1k</span>;
+<span class="hljs-attribute">gzip_types</span> text/plain text/css application/json application/javascript application/xml image/svg+xml;
+<span class="hljs-attribute">gzip_vary</span> <span class="hljs-literal">on</span>;
+</code></pre><blockquote>
+<p>调优顺序建议：先查 <code>nginx -t</code> 语法、<code>nginx -s reload</code> 平滑生效、<code>tail -f /var/log/nginx/access.log</code> 看真实请求，再动手改。Nginx 的坑大多是&quot;配置没生效/顺序不对/忘了 reload&quot;，排查时先排除这三项。</p>
+</blockquote>
+<blockquote>
+<p>总结：Nginx 是 Java 后端部署的必修课。静态资源、反向代理、负载均衡、HTTPS 这四件事，配上 location 匹配规则和超时/上传两个高频坑，基本能覆盖 90% 的日常场景。配置不难，难点在懂得<strong>每一条指令为什么要这么写</strong>——转发头、超时、缓冲这些细节，才是生产环境里真正的分水岭。</p>
+</blockquote>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/api-optimization.html"><span>← 上一篇</span><b>接口性能优化：从 2 秒到 200 毫秒</b></a>
+    <a class="pn-btn next" href="/post/mqtt-offline-debug.html"><span>下一篇 →</span><b>400 台设备批量掉线排查：ClientID 冲突引发的血案</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Docker 部署 Spring Boot 应用：从 Dockerfile 到 Compose · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#背景-手工部署的日子过不下去了">背景：手工部署的日子过不下去了</a></li><li class="toc-l2"><a href="#为什么用多阶段构建">为什么用多阶段构建</a></li><li class="toc-l2"><a href="#分层-dockerfile-利用构建缓存">分层 Dockerfile：利用构建缓存</a></li><li class="toc-l2"><a href="#更精细的方案-spring-boot-3-分层镜像">更精细的方案：Spring Boot 3 分层镜像</a></li><li class="toc-l2"><a href="#dockerignore-别把垃圾带进构建上下文">.dockerignore：别把垃圾带进构建上下文</a></li><li class="toc-l2"><a href="#jvm-参数与健康检查">JVM 参数与健康检查</a></li><li class="toc-l2"><a href="#docker-compose-一键编排">docker-compose 一键编排</a></li><li class="toc-l2"><a href="#常用运维命令">常用运维命令</a></li><li class="toc-l2"><a href="#常见坑总结">常见坑总结</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">⚙️ 工程实践</span></p>
+      <h1>Docker 部署 Spring Boot 应用：从 Dockerfile 到 Compose</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2025-11-02</span>
+        <span class="meta-read">☕ 预计阅读 16 分钟</span>
+        <span class="meta-tags"><code>#Docker</code> <code>#Spring Boot</code> <code>#DevOps</code> <code>#Compose</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="背景-手工部署的日子过不下去了">背景：手工部署的日子过不下去了</h2><p>去年我们项目的部署流程是这样的：开发机 <code>mvn package</code> → 打包上传 → 服务器上 <code>kill</code> 旧进程 → <code>nohup java -jar</code> 启动 → 手动起 MySQL、Redis → 改配置里的 IP。一个月部署三次，每次半小时起步，中间还出过好几次&quot;版本打错&quot;&quot;配置忘改&quot;的事故。</p>
+<p>后来把部署整体迁到 Docker，用多阶段构建 + docker-compose 编排，把&quot;构建镜像、起数据库、起应用&quot;浓缩成一条命令。这篇文章就把这套东西完整讲一遍，全部基于 Spring Boot 3 + Java 17。</p>
+<blockquote>
+<p>本文假设你已经装了 Docker Desktop（Windows/Mac）或 docker-ce（Linux），并且对 <code>docker build</code>、<code>docker run</code> 有最基础的使用经验。</p>
+</blockquote>
+<h2 id="为什么用多阶段构建">为什么用多阶段构建</h2><p>先看单阶段方案的典型写法：</p>
+<pre><code class="language-dockerfile"><span class="hljs-keyword">FROM</span> maven:<span class="hljs-number">3.9</span>.<span class="hljs-number">9</span>-eclipse-temurin-<span class="hljs-number">17</span>
+<span class="hljs-keyword">WORKDIR</span><span class="language-bash"> /app</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> . .</span>
+<span class="hljs-keyword">RUN</span><span class="language-bash"> mvn package -DskipTests</span>
+<span class="hljs-keyword">EXPOSE</span> <span class="hljs-number">8080</span>
+<span class="hljs-keyword">CMD</span><span class="language-bash"> [<span class="hljs-string">&quot;java&quot;</span>, <span class="hljs-string">&quot;-jar&quot;</span>, <span class="hljs-string">&quot;target/demo.jar&quot;</span>]</span>
+</code></pre><p>能跑，但问题很明显：<strong>运行镜像里塞了一整套 JDK + Maven + 源码 + 编译中间产物</strong>，镜像体积轻松 700MB+，而且一旦代码泄露风险也大。</p>
+<p>多阶段构建的思路是<strong>借鸡生蛋</strong>：第一阶段用带 Maven 的镜像把 jar 编译出来，第二阶段只拿这个 jar 配一个精简的 JRE 运行时。</p>
+<table>
+<thead>
+<tr>
+<th>对比项</th>
+<th>单阶段（maven 镜像运行）</th>
+<th>多阶段（jre 镜像运行）</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>镜像体积</td>
+<td>700MB+</td>
+<td>~200MB（JRE + jar）</td>
+</tr>
+<tr>
+<td>构建产物纯度</td>
+<td>含源码、编译缓存</td>
+<td>只有可运行产物</td>
+</tr>
+<tr>
+<td>安全面</td>
+<td>大（镜像里有构建工具）</td>
+<td>小</td>
+</tr>
+<tr>
+<td>部署速度</td>
+<td>慢（大镜像拉取/传输）</td>
+<td>快</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>补充一句：Java 17+ 的 JRE 镜像本身就有 180MB 左右的底子（底层是 Ubuntu），真正省掉的是 Maven 和 JDK 编译组件那 500MB。想再压可以用 alpine 变体或 jlink 裁剪 JRE，但那是进阶话题，本文先不展开。</p>
+</blockquote>
+<h2 id="分层-dockerfile-利用构建缓存">分层 Dockerfile：利用构建缓存</h2><p>Dockerfile 每条指令生成一个层，<strong>层没变就会命中缓存</strong>。如果先 <code>COPY . .</code> 再 <code>RUN mvn package</code>，那么任何文件改动（包括只改一行代码）都会让依赖下载、编译全部重来。正确姿势是<strong>先固定依赖、后引入源码</strong>：</p>
+<pre><code class="language-dockerfile"><span class="hljs-comment"># ---- 阶段一：构建 ----</span>
+<span class="hljs-keyword">FROM</span> maven:<span class="hljs-number">3.9</span>.<span class="hljs-number">9</span>-eclipse-temurin-<span class="hljs-number">17</span> AS builder
+<span class="hljs-keyword">WORKDIR</span><span class="language-bash"> /build</span>
+
+<span class="hljs-comment"># 1. 先只拷 pom.xml，触发依赖下载</span>
+<span class="hljs-comment">#    只要 pom.xml 没变，这一层和下一层永远命中缓存</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> pom.xml .</span>
+<span class="hljs-keyword">RUN</span><span class="language-bash"> mvn -B -q dependency:go-offline</span>
+
+<span class="hljs-comment"># 2. 再拷源码，业务代码改动不会殃及依赖层</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> src ./src</span>
+<span class="hljs-keyword">RUN</span><span class="language-bash"> mvn -B package -DskipTests</span>
+
+<span class="hljs-comment"># ---- 阶段二：运行 ----</span>
+<span class="hljs-keyword">FROM</span> eclipse-temurin:<span class="hljs-number">17</span>-jre
+<span class="hljs-keyword">WORKDIR</span><span class="language-bash"> /app</span>
+
+<span class="hljs-comment"># 非 root 用户运行，生产环境的基本素养</span>
+<span class="hljs-keyword">RUN</span><span class="language-bash"> useradd --create-home appuser</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> --from=builder /build/target/demo-0.0.1-SNAPSHOT.jar app.jar</span>
+<span class="hljs-keyword">USER</span> appuser
+
+<span class="hljs-keyword">EXPOSE</span> <span class="hljs-number">8080</span>
+<span class="hljs-keyword">ENTRYPOINT</span><span class="language-bash"> [<span class="hljs-string">&quot;java&quot;</span>, <span class="hljs-string">&quot;-jar&quot;</span>, <span class="hljs-string">&quot;app.jar&quot;</span>]</span>
+</code></pre><p>如果项目里有多个模块、依赖又多，<code>dependency:go-offline</code> 能保证依赖被完整预下载；单模块小项目可以直接 <code>RUN mvn dependency:resolve</code>。</p>
+<blockquote>
+<p>效果：这套写法下，依赖版本不动时，本地改代码触发重建通常十几秒就完成（依赖层全命中缓存），而不是每次干等 3 分钟下载依赖。</p>
+</blockquote>
+<h2 id="更精细的方案-spring-boot-3-分层镜像">更精细的方案：Spring Boot 3 分层镜像</h2><p>Spring Boot 3 的 jar 内部结构是分层的，<code>BOOT-INF/lib</code> 是依赖、<code>BOOT-INF/classes</code> 是业务代码，插件还会生成 <code>layers.idx</code>（application / spring-boot-loader / dependencies / snapshot-dependencies 四层）。用官方提供的 <code>layertools</code> 把 jar 拆开，每一层单独 COPY，<strong>依赖层就能独立缓存</strong>：</p>
+<pre><code class="language-dockerfile"><span class="hljs-comment"># ---- 阶段一：构建 ----</span>
+<span class="hljs-keyword">FROM</span> maven:<span class="hljs-number">3.9</span>.<span class="hljs-number">9</span>-eclipse-temurin-<span class="hljs-number">17</span> AS builder
+<span class="hljs-keyword">WORKDIR</span><span class="language-bash"> /build</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> pom.xml .</span>
+<span class="hljs-keyword">RUN</span><span class="language-bash"> mvn -B -q dependency:go-offline</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> src ./src</span>
+<span class="hljs-keyword">RUN</span><span class="language-bash"> mvn -B package -DskipTests</span>
+
+<span class="hljs-comment"># ---- 阶段二：提取分层 ----</span>
+<span class="hljs-keyword">FROM</span> eclipse-temurin:<span class="hljs-number">17</span>-jre AS extractor
+<span class="hljs-keyword">WORKDIR</span><span class="language-bash"> /app</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> --from=builder /build/target/*.jar app.jar</span>
+<span class="hljs-keyword">RUN</span><span class="language-bash"> java -Djarmode=layertools -jar app.jar extract</span>
+
+<span class="hljs-comment"># ---- 阶段三：运行（分层 COPY）----</span>
+<span class="hljs-keyword">FROM</span> eclipse-temurin:<span class="hljs-number">17</span>-jre
+<span class="hljs-keyword">WORKDIR</span><span class="language-bash"> /app</span>
+
+<span class="hljs-keyword">COPY</span><span class="language-bash"> --from=extractor /app/dependencies/ ./</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> --from=extractor /app/spring-boot-loader/ ./</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> --from=extractor /app/snapshot-dependencies/ ./</span>
+<span class="hljs-keyword">COPY</span><span class="language-bash"> --from=extractor /app/application/ ./</span>
+
+<span class="hljs-keyword">RUN</span><span class="language-bash"> useradd --create-home appuser</span>
+<span class="hljs-keyword">USER</span> appuser
+<span class="hljs-keyword">EXPOSE</span> <span class="hljs-number">8080</span>
+<span class="hljs-keyword">ENTRYPOINT</span><span class="language-bash"> [<span class="hljs-string">&quot;java&quot;</span>, <span class="hljs-string">&quot;-jar&quot;</span>, <span class="hljs-string">&quot;app.jar&quot;</span>]</span>
+</code></pre><p>顺序很讲究：<code>dependencies</code> 在最前面、<code>application</code>（业务代码）在最后面——<strong>业务代码改动时只有 application 层需要重建</strong>，CI 里镜像构建从 40 秒降到 8 秒是常有的事。</p>
+<blockquote>
+<p>如果你没耐心搞 layertools，就用上一节&quot;简单 <code>COPY --from=builder</code>&quot;的写法，正确性完全没问题，只是每次业务改动都要重新传输整个 jar。<strong>分层是缓存优化，不是功能需求</strong>，按团队规模取舍。</p>
+</blockquote>
+<h2 id="dockerignore-别把垃圾带进构建上下文">.dockerignore：别把垃圾带进构建上下文</h2><p><code>docker build</code> 会把目录整个打包发给 Docker 守护进程，没有 <code>.dockerignore</code> 时，<code>target/</code>（几百 MB 的构建产物）、<code>.git/</code> 全都会被传过去，又慢又没必要：</p>
+<pre><code class="language-dockerignore">target/
+.git/
+.gitignore
+.idea/
+*.iml
+*.log
+Dockerfile
+docker-compose.yml
+.env
+</code></pre><blockquote>
+<p>排查技巧：如果 <code>docker build</code> 卡在 <code>Sending build context</code> 很久，十有八九是 <code>.dockerignore</code> 没配好。命令 <code>docker build -f Dockerfile -t demo:latest .</code> 末尾的 <code>.</code> 就是上下文根目录。</p>
+</blockquote>
+<h2 id="jvm-参数与健康检查">JVM 参数与健康检查</h2><p>容器里的 JVM 有个经典坑：<strong>默认按宿主机的内存算堆大小</strong>。宿主机 32G 内存、容器限 1G，JVM 却可能给你开 8G 堆，直接 OOM 被杀。正确做法是用 <code>MaxRAMPercentage</code> 按比例分配：</p>
+<pre><code class="language-dockerfile"><span class="hljs-keyword">ENV</span> JAVA_OPTS=<span class="hljs-string">&quot;-XX:MaxRAMPercentage=75 -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom -Dfile.encoding=UTF-8&quot;</span>
+
+<span class="hljs-keyword">ENTRYPOINT</span><span class="language-bash"> [<span class="hljs-string">&quot;sh&quot;</span>, <span class="hljs-string">&quot;-c&quot;</span>, <span class="hljs-string">&quot;java <span class="hljs-variable">$JAVA_OPTS</span> -jar app.jar&quot;</span>]</span>
+</code></pre><p><code>75%</code> 的意思是给 JVM 留 25% 给堆外内存（Metaspace、线程栈、直接内存）。如果容器限制 <code>768m</code>，堆大概是 576m，配合 G1 在服务场景下表现稳定。</p>
+<p>健康检查配合 Spring Boot Actuator：</p>
+<pre><code class="language-xml"><span class="hljs-tag">&lt;<span class="hljs-name">dependency</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">groupId</span>&gt;</span>org.springframework.boot<span class="hljs-tag">&lt;/<span class="hljs-name">groupId</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">artifactId</span>&gt;</span>spring-boot-starter-actuator<span class="hljs-tag">&lt;/<span class="hljs-name">artifactId</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">dependency</span>&gt;</span>
+</code></pre><pre><code class="language-yaml"><span class="hljs-attr">management:</span>
+  <span class="hljs-attr">endpoints:</span>
+    <span class="hljs-attr">web:</span>
+      <span class="hljs-attr">exposure:</span>
+        <span class="hljs-attr">include:</span> <span class="hljs-string">health,info</span>
+</code></pre><p>Dockerfile 里加 <code>HEALTHCHECK</code>，让容器本身知道自己是否可用：</p>
+<pre><code class="language-dockerfile"><span class="hljs-keyword">HEALTHCHECK</span><span class="language-bash"> --interval=30s --<span class="hljs-built_in">timeout</span>=5s --start-period=60s --retries=3 \
+  CMD wget -q -O /dev/null http://localhost:8080/actuator/health || <span class="hljs-built_in">exit</span> 1</span>
+</code></pre><blockquote>
+<p>注意：<code>eclipse-temurin</code> 基于 Ubuntu，自带 <code>wget</code>。如果换 alpine 基础镜像，<code>wget</code>（busybox 版）也有；但别默认有 <code>curl</code>，很多精简镜像没装，healthcheck 会一直失败。</p>
+</blockquote>
+<h2 id="docker-compose-一键编排">docker-compose 一键编排</h2><p>单机部署场景，docker-compose 就是最顺手的编排工具。下面这份 <code>docker-compose.yml</code> 编排 MySQL 8.4 + Redis 7 + Spring Boot 应用，<strong>环境变量全部注入</strong>，应用和数据卷分离：</p>
+<pre><code class="language-yaml"><span class="hljs-attr">services:</span>
+  <span class="hljs-attr">mysql:</span>
+    <span class="hljs-attr">image:</span> <span class="hljs-string">mysql:8.4</span>
+    <span class="hljs-attr">restart:</span> <span class="hljs-string">unless-stopped</span>
+    <span class="hljs-attr">environment:</span>
+      <span class="hljs-attr">MYSQL_ROOT_PASSWORD:</span> <span class="hljs-string">${MYSQL_ROOT_PASSWORD:-root123}</span>
+      <span class="hljs-attr">MYSQL_DATABASE:</span> <span class="hljs-string">appdb</span>
+      <span class="hljs-attr">MYSQL_USER:</span> <span class="hljs-string">app</span>
+      <span class="hljs-attr">MYSQL_PASSWORD:</span> <span class="hljs-string">${MYSQL_PASSWORD:-app123}</span>
+    <span class="hljs-attr">volumes:</span>
+      <span class="hljs-bullet">-</span> <span class="hljs-string">mysql-data:/var/lib/mysql</span>
+      <span class="hljs-bullet">-</span> <span class="hljs-string">./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro</span>   <span class="hljs-comment"># 首次启动自动执行建表脚本</span>
+    <span class="hljs-attr">healthcheck:</span>
+      <span class="hljs-attr">test:</span> [<span class="hljs-string">&quot;CMD&quot;</span>, <span class="hljs-string">&quot;mysqladmin&quot;</span>, <span class="hljs-string">&quot;ping&quot;</span>, <span class="hljs-string">&quot;-h&quot;</span>, <span class="hljs-string">&quot;127.0.0.1&quot;</span>, <span class="hljs-string">&quot;-uroot&quot;</span>, <span class="hljs-string">&quot;-p${MYSQL_ROOT_PASSWORD:-root123}&quot;</span>]
+      <span class="hljs-attr">interval:</span> <span class="hljs-string">10s</span>
+      <span class="hljs-attr">timeout:</span> <span class="hljs-string">5s</span>
+      <span class="hljs-attr">retries:</span> <span class="hljs-number">5</span>
+    <span class="hljs-attr">ports:</span>
+      <span class="hljs-bullet">-</span> <span class="hljs-string">&quot;3306:3306&quot;</span>
+
+  <span class="hljs-attr">redis:</span>
+    <span class="hljs-attr">image:</span> <span class="hljs-string">redis:7-alpine</span>
+    <span class="hljs-attr">restart:</span> <span class="hljs-string">unless-stopped</span>
+    <span class="hljs-attr">command:</span> [<span class="hljs-string">&quot;redis-server&quot;</span>, <span class="hljs-string">&quot;--appendonly&quot;</span>, <span class="hljs-string">&quot;yes&quot;</span>]
+    <span class="hljs-attr">volumes:</span>
+      <span class="hljs-bullet">-</span> <span class="hljs-string">redis-data:/data</span>
+
+  <span class="hljs-attr">app:</span>
+    <span class="hljs-attr">build:</span>
+      <span class="hljs-attr">context:</span> <span class="hljs-string">.</span>
+      <span class="hljs-attr">dockerfile:</span> <span class="hljs-string">Dockerfile</span>
+    <span class="hljs-attr">restart:</span> <span class="hljs-string">unless-stopped</span>
+    <span class="hljs-attr">depends_on:</span>
+      <span class="hljs-attr">mysql:</span>
+        <span class="hljs-attr">condition:</span> <span class="hljs-string">service_healthy</span>   <span class="hljs-comment"># 等 MySQL 健康检查通过再启动</span>
+      <span class="hljs-attr">redis:</span>
+        <span class="hljs-attr">condition:</span> <span class="hljs-string">service_started</span>
+    <span class="hljs-attr">environment:</span>
+      <span class="hljs-attr">SPRING_PROFILES_ACTIVE:</span> <span class="hljs-string">prod</span>
+      <span class="hljs-attr">SPRING_DATASOURCE_URL:</span> <span class="hljs-string">jdbc:mysql://mysql:3306/appdb?useUnicode=true&amp;characterEncoding=utf8&amp;serverTimezone=Asia/Shanghai&amp;useSSL=false</span>
+      <span class="hljs-attr">SPRING_DATASOURCE_USERNAME:</span> <span class="hljs-string">app</span>
+      <span class="hljs-attr">SPRING_DATASOURCE_PASSWORD:</span> <span class="hljs-string">${MYSQL_PASSWORD:-app123}</span>
+      <span class="hljs-attr">SPRING_DATA_REDIS_HOST:</span> <span class="hljs-string">redis</span>
+      <span class="hljs-attr">SPRING_DATA_REDIS_PORT:</span> <span class="hljs-number">6379</span>
+    <span class="hljs-attr">ports:</span>
+      <span class="hljs-bullet">-</span> <span class="hljs-string">&quot;8080:8080&quot;</span>
+    <span class="hljs-attr">healthcheck:</span>
+      <span class="hljs-attr">test:</span> [<span class="hljs-string">&quot;CMD&quot;</span>, <span class="hljs-string">&quot;wget&quot;</span>, <span class="hljs-string">&quot;-q&quot;</span>, <span class="hljs-string">&quot;-O&quot;</span>, <span class="hljs-string">&quot;/dev/null&quot;</span>, <span class="hljs-string">&quot;http://localhost:8080/actuator/health&quot;</span>]
+      <span class="hljs-attr">interval:</span> <span class="hljs-string">30s</span>
+      <span class="hljs-attr">timeout:</span> <span class="hljs-string">5s</span>
+      <span class="hljs-attr">start_period:</span> <span class="hljs-string">60s</span>
+      <span class="hljs-attr">retries:</span> <span class="hljs-number">3</span>
+
+<span class="hljs-attr">volumes:</span>
+  <span class="hljs-attr">mysql-data:</span>
+  <span class="hljs-attr">redis-data:</span>
+</code></pre><p>两个关键点说明：</p>
+<ul>
+<li><strong>环境变量注入</strong>：Spring Boot 的 <code>Environment</code> 支持宽松绑定，<code>SPRING_DATASOURCE_URL</code> 自动映射到 <code>spring.datasource.url</code>，比 <code>application-prod.yml</code> 里写死 IP 灵活得多；</li>
+<li><strong>启动顺序</strong>：<code>depends_on</code> 加 <code>condition: service_healthy</code>，确保应用启动时 MySQL 已经接受连接（MySQL 首次初始化要 30~60 秒，不加这个条件应用必炸）。</li>
+</ul>
+<blockquote>
+<p>密码别硬编码进 compose 文件提交到 git：把 <code>MYSQL_PASSWORD</code> 放进 <code>.env</code> 文件（compose 自动读取），<code>.env</code> 加进 <code>.gitignore</code>。上面 <code>${VAR:-默认值}</code> 的写法就是在无 <code>.env</code> 时给默认值兜底。</p>
+</blockquote>
+<p>启动：</p>
+<pre><code class="language-bash">docker compose up -d --build
+</code></pre><h2 id="常用运维命令">常用运维命令</h2><p>记几个高频命令，够日常用了：</p>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>命令</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>构建并启动</td>
+<td><code>docker compose up -d --build</code></td>
+<td>改代码后重建</td>
+</tr>
+<tr>
+<td>查看状态</td>
+<td><code>docker compose ps</code></td>
+<td>各服务状态、端口映射</td>
+</tr>
+<tr>
+<td>跟随日志</td>
+<td><code>docker compose logs -f app</code></td>
+<td>只看 app 服务日志</td>
+</tr>
+<tr>
+<td>滚动重启</td>
+<td><code>docker compose up -d --no-deps --build app</code></td>
+<td>只重建 app，不动数据库</td>
+</tr>
+<tr>
+<td>进入容器</td>
+<td><code>docker exec -it app sh</code></td>
+<td>排查问题</td>
+</tr>
+<tr>
+<td>全部停止</td>
+<td><code>docker compose down</code></td>
+<td>加 <code>-v</code> 会连数据卷一起删，慎用</td>
+</tr>
+<tr>
+<td>清理垃圾</td>
+<td><code>docker system prune -af</code></td>
+<td>清理悬空镜像和卷，小心误删</td>
+</tr>
+</tbody></table>
+<p>日志规范单独强调一句：<strong>容器里日志只写 stdout/stderr，不要写文件</strong>。Spring Boot 默认的 logback 就是输出到控制台，正好满足 <code>docker compose logs</code> 的采集方式；一旦把日志写到容器内文件，<code>docker logs</code> 啥也看不到，还得进容器翻文件，得不偿失。</p>
+<h2 id="常见坑总结">常见坑总结</h2><ol>
+<li><strong>时区错乱</strong>：JVM 默认 UTC，时间字段全差 8 小时。要么 compose 里给 app 加 <code>TZ: Asia/Shanghai</code>，要么启动参数加 <code>-Duser.timezone=Asia/Shanghai</code>，MySQL 连接串里也加 <code>serverTimezone</code>；</li>
+<li><strong>应用比数据库先起</strong>：MySQL 容器启动 ≠ MySQL 可用，首次初始化很慢。必须用 <code>depends_on: condition: service_healthy</code> 而不是裸 <code>depends_on</code>；</li>
+<li><strong>JVM 不认容器限额</strong>：老版本 JDK 按宿主机内存算堆，容器内 <code>free -m</code> 卡得住，JVM 照样超。新镜像 + <code>MaxRAMPercentage</code> 解决；</li>
+<li><strong>构建缓存失效</strong>：<code>COPY . .</code> 放在 <code>RUN mvn</code> 前面会让依赖层每次重建，顺序要从不变的到易变的；</li>
+<li><strong>密码进 git</strong>：<code>.env</code>、compose 里的明文密码要防泄漏，必要时用 secret 机制。</li>
+</ol>
+<blockquote>
+<p>总结：从&quot;手搓部署&quot;到&quot;一条 compose 命令起全套&quot;，省下的不只是半小时的部署时间，更是<strong>环境一致性</strong>——开发、测试、生产跑同一份配置，很多&quot;在我机器上明明是好的&quot;从此消失。下一步如果服务多起来、要扩副本，就该上 K8s 了，那是另一个世界。</p>
+</blockquote>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/mqtt-offline-debug.html"><span>← 上一篇</span><b>400 台设备批量掉线排查：ClientID 冲突引发的血案</b></a>
+    <a class="pn-btn next" href="/post/bit-trick.html"><span>下一篇 →</span><b>找单独的数：一道题吃透 Java 位运算</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>线上故障排查：一条慢查询引发的服务雪崩 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#故障现象-又是一次-偶发大面积超时">故障现象：又是一次「偶发大面积超时」</a></li><li class="toc-l2"><a href="#排查路径-一层一层往下挖">排查路径：一层一层往下挖</a></li><li class="toc-l3"><a href="#第一步-监控大盘-先看-哪里不正常">第一步：监控大盘，先看「哪里不正常」</a></li><li class="toc-l3"><a href="#第二步-连接池指标-确认是-等连接-还是-执行慢">第二步：连接池指标，确认是「等连接」还是「执行慢」</a></li><li class="toc-l3"><a href="#第三步-慢查询日志-揪出元凶">第三步：慢查询日志，揪出元凶</a></li><li class="toc-l2"><a href="#根因分析-两个经典的索引失效">根因分析：两个经典的索引失效</a></li><li class="toc-l3"><a href="#失效点一-隐式类型转换">失效点一：隐式类型转换</a></li><li class="toc-l3"><a href="#失效点二-对索引列做函数操作">失效点二：对索引列做函数操作</a></li><li class="toc-l3"><a href="#为什么偏偏这个时段爆发">为什么偏偏这个时段爆发</a></li><li class="toc-l2"><a href="#当时的激进方案-加连接数-为什么无效">当时的激进方案：加连接数，为什么无效</a></li><li class="toc-l2"><a href="#正确解法-拆-sql-改索引-加兜底">正确解法：拆 SQL、改索引、加兜底</a></li><li class="toc-l3"><a href="#第一步-sql-拆分-范围查询">第一步：SQL 拆分 + 范围查询</a></li><li class="toc-l3"><a href="#第二步-索引改造">第二步：索引改造</a></li><li class="toc-l3"><a href="#第三步-限流兜底-快速失败">第三步：限流兜底 + 快速失败</a></li><li class="toc-l2"><a href="#复盘总结">复盘总结</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">🐞 踩坑实战</span></p>
+      <h1>线上故障排查：一条慢查询引发的服务雪崩</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2026-03-16</span>
+        <span class="meta-read">☕ 预计阅读 10 分钟</span>
+        <span class="meta-tags"><code>#MySQL</code> <code>#故障排查</code> <code>#慢查询</code> <code>#连接池</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="故障现象-又是一次-偶发大面积超时">故障现象：又是一次「偶发大面积超时」</h2><p>三月中旬的周一，10:24 分，值班群里炸了：设备采集服务大面积超时，平台侧「设备最新状态」「遥测数据查询」两个接口成功率从 99.9% 掉到 70% 以下，持续了大约 12 分钟后自行恢复。</p>
+<p>这已经是这周第三次了，前两次都是 10 分钟左右自愈，当时都归因为「网络抖动」。但问题反复出现，这次必须查到根。于是我从监控大盘开始，一层一层往下挖。</p>
+<h2 id="排查路径-一层一层往下挖">排查路径：一层一层往下挖</h2><h3 id="第一步-监控大盘-先看-哪里不正常">第一步：监控大盘，先看「哪里不正常」</h3><p>打开 Grafana，先看服务自身的资源：</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>表现</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>应用 CPU</td>
+<td>正常波动，峰值 40%</td>
+</tr>
+<tr>
+<td>应用内存</td>
+<td>老年代曲线爬坡，GC 频次上升</td>
+</tr>
+<tr>
+<td>HikariCP active</td>
+<td>触顶 50/50，持续 10 分钟</td>
+</tr>
+<tr>
+<td>HikariCP pending</td>
+<td>大量线程在等连接</td>
+</tr>
+<tr>
+<td>MySQL CPU</td>
+<td>100% 打满</td>
+</tr>
+<tr>
+<td>MySQL Threads_running</td>
+<td>峰值 400+</td>
+</tr>
+</tbody></table>
+<p>一个非常关键的信号：<strong>MySQL CPU 打满，但应用 CPU 不高</strong>。流量没有暴涨（QPS 和平常一样），数据库却满负荷——典型的「某条 SQL 把数据库拖死了」。</p>
+<h3 id="第二步-连接池指标-确认是-等连接-还是-执行慢">第二步：连接池指标，确认是「等连接」还是「执行慢」</h3><p>HikariCP 的监控一眼看出问题：active 连接长期 50/50，pending 队列里排着几百个等待线程，等待时间超过 30 秒（<code>connectionTimeout</code> 默认 30s），大量请求在这里直接超时：</p>
+<pre><code class="language-json"><span class="hljs-punctuation">{</span>
+  <span class="hljs-attr">&quot;active&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-number">50</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;idle&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-number">0</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;pending&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-number">368</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;max&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-number">50</span><span class="hljs-punctuation">,</span>
+  <span class="hljs-attr">&quot;threadsAwaitingConnection&quot;</span><span class="hljs-punctuation">:</span> <span class="hljs-number">368</span>
+<span class="hljs-punctuation">}</span>
+</code></pre><p>这说明不是「应用没拿到连接」这么简单——连接被占着不放，而占着的连接大概率在等一条慢 SQL 返回。这时候如果只看连接池就去加连接数，就掉进坑里了（后面细说）。</p>
+<h3 id="第三步-慢查询日志-揪出元凶">第三步：慢查询日志，揪出元凶</h3><p>线上慢查询阈值配置的还是默认 10 秒，查了半天一条都没记录——这也是前两次没查出来的原因之一。先临时调低：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">SET</span> <span class="hljs-keyword">GLOBAL</span> long_query_time <span class="hljs-operator">=</span> <span class="hljs-number">2</span>;
+<span class="hljs-keyword">SET</span> <span class="hljs-keyword">GLOBAL</span> slow_query_log <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;ON&#x27;</span>;
+</code></pre><p>10 分钟后抓到元凶，单条执行 19.4 秒：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> id, device_no, data_type, temperature, status, report_time
+<span class="hljs-keyword">FROM</span> t_device_realtime
+<span class="hljs-keyword">WHERE</span> device_no <span class="hljs-operator">=</span> <span class="hljs-number">202506011234567890</span>
+  <span class="hljs-keyword">AND</span> DATE_FORMAT(report_time, <span class="hljs-string">&#x27;%Y-%m-%d&#x27;</span>) <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;2025-06-01&#x27;</span>
+<span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> id <span class="hljs-keyword">DESC</span>;
+</code></pre><p>EXPLAIN 一下：</p>
+<pre><code class="language-sql">EXPLAIN <span class="hljs-keyword">SELECT</span> id, device_no, data_type, temperature, status, report_time
+        <span class="hljs-keyword">FROM</span> t_device_realtime
+        <span class="hljs-keyword">WHERE</span> device_no <span class="hljs-operator">=</span> <span class="hljs-number">202506011234567890</span>
+          <span class="hljs-keyword">AND</span> DATE_FORMAT(report_time, <span class="hljs-string">&#x27;%Y-%m-%d&#x27;</span>) <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;2025-06-01&#x27;</span>
+        <span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> id <span class="hljs-keyword">DESC</span>;
+</code></pre><p>结果：</p>
+<table>
+<thead>
+<tr>
+<th>列</th>
+<th>值</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>type</td>
+<td>ALL</td>
+</tr>
+<tr>
+<td>key</td>
+<td>NULL</td>
+</tr>
+<tr>
+<td>rows</td>
+<td>12,387,411</td>
+</tr>
+<tr>
+<td>Extra</td>
+<td>Using where; Using filesort</td>
+</tr>
+</tbody></table>
+<p>1200 万行全表扫描，还带着 filesort。</p>
+<h2 id="根因分析-两个经典的索引失效">根因分析：两个经典的索引失效</h2><h3 id="失效点一-隐式类型转换">失效点一：隐式类型转换</h3><p><code>device_no</code> 字段是 <code>VARCHAR(32)</code>，但 SQL 里传的是数字字面量 <code>202506011234567890</code>。MySQL 比较时会做隐式类型转换：<strong>把字符串字段 cast 成数字再比较</strong>。一旦对索引列做类型转换，索引就废了。</p>
+<pre><code class="language-sql"><span class="hljs-comment">-- 等价写法（索引列上做了函数操作 → 失效）</span>
+<span class="hljs-keyword">SELECT</span> ... <span class="hljs-keyword">FROM</span> t_device_realtime
+<span class="hljs-keyword">WHERE</span> <span class="hljs-built_in">CAST</span>(device_no <span class="hljs-keyword">AS</span> UNSIGNED) <span class="hljs-operator">=</span> <span class="hljs-number">202506011234567890</span> ...
+</code></pre><p>验证方法：<code>EXPLAIN</code> 里 <code>key</code> 为 NULL；或者把参数改成字符串 <code>&#39;202506011234567890&#39;</code> 再 EXPLAIN，索引立即命中。</p>
+<h3 id="失效点二-对索引列做函数操作">失效点二：对索引列做函数操作</h3><p><code>DATE_FORMAT(report_time, &#39;%Y-%m-%d&#39;) = &#39;2025-06-01&#39;</code> 看着人畜无害，但它把 <code>report_time</code> 包进了函数里，即使有 <code>report_time</code> 索引也用不上，必须全表算一遍。</p>
+<blockquote>
+<p>这是慢查询里出现频率最高的两类「索引失效」写法。判断口诀：<strong>索引列要单独出现在比较符号的一边，且不要有任何函数、计算或类型转换</strong>。</p>
+</blockquote>
+<h3 id="为什么偏偏这个时段爆发">为什么偏偏这个时段爆发</h3><p>对照监控发现：每次故障都发生在「批量导入设备档案 + 批量补采数据任务」跑完后 30 分钟内。这个任务每补采完一批设备就要刷新一次最新遥测，并发调用了上千次这个查询 SQL，把慢查询从「零散几条」放大成「压垮数据库的洪流」。</p>
+<h2 id="当时的激进方案-加连接数-为什么无效">当时的激进方案：加连接数，为什么无效</h2><p>第一次值班的人（包括我）第一反应都是：连接池满了，加连接数呗。</p>
+<pre><code class="language-yaml"><span class="hljs-attr">spring:</span>
+  <span class="hljs-attr">datasource:</span>
+    <span class="hljs-attr">hikari:</span>
+      <span class="hljs-attr">maximum-pool-size:</span> <span class="hljs-number">200</span>   <span class="hljs-comment"># 50 → 200</span>
+      <span class="hljs-attr">connection-timeout:</span> <span class="hljs-number">30000</span>
+</code></pre><p>MySQL 侧也加了 <code>max_connections</code>。结果：<strong>更糟</strong>。</p>
+<ul>
+<li>慢 SQL 还在查全表，200 条连接照样被 19 秒的查询占满，只是从「50 条慢」变成「200 条慢」；</li>
+<li>200 个线程同时打满 MySQL，<code>Threads_running</code> 再创新高，InnoDB 锁等待加剧，连正常的快查询也开始排队；</li>
+<li>数据库 CPU 从 100% 变成长期 100%，应用侧等待线程把 Tomcat 线程池也占满，新请求直接 503；</li>
+<li>大量持有未消费结果集的线程对象晋升老年代，Full GC 开始密集触发——这就是大盘上 GC 曲线爬坡的原因，STW 让本就拥挤的请求雪上加霜——<strong>雪崩的连锁反应</strong>。</li>
+</ul>
+<blockquote>
+<p>连接池的本质是「流量调节阀」，不是「慢查询加速器」。慢 SQL 不解决，加多少连接都是借高利贷，最后连本带利还回去。</p>
+</blockquote>
+<p>后来把配置改回去，用下面的方案根治。</p>
+<h2 id="正确解法-拆-sql-改索引-加兜底">正确解法：拆 SQL、改索引、加兜底</h2><h3 id="第一步-sql-拆分-范围查询">第一步：SQL 拆分 + 范围查询</h3><p>把「函数比较」改成「范围查询」，让索引可用；同时按天分批，避免单次扫描全表：</p>
+<pre><code class="language-sql"><span class="hljs-comment">-- 改造后：走 report_time 范围，配合联合索引</span>
+<span class="hljs-keyword">SELECT</span> id, device_no, data_type, temperature, status, report_time
+<span class="hljs-keyword">FROM</span> t_device_realtime
+<span class="hljs-keyword">WHERE</span> device_no <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;202506011234567890&#x27;</span>
+  <span class="hljs-keyword">AND</span> report_time <span class="hljs-operator">&gt;=</span> <span class="hljs-string">&#x27;2025-06-01 00:00:00&#x27;</span>
+  <span class="hljs-keyword">AND</span> report_time <span class="hljs-operator">&lt;</span>  <span class="hljs-string">&#x27;2025-06-02 00:00:00&#x27;</span>
+<span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> id <span class="hljs-keyword">DESC</span>
+LIMIT <span class="hljs-number">1000</span>;
+</code></pre><p>数据量还大的话，用 id 游标分页代替 OFFSET 分页，每批 1000 条：</p>
+<pre><code class="language-sql"><span class="hljs-comment">-- 游标式分批：拿上一批最大 id 继续</span>
+<span class="hljs-keyword">SELECT</span> id, device_no, data_type, temperature, status, report_time
+<span class="hljs-keyword">FROM</span> t_device_realtime
+<span class="hljs-keyword">WHERE</span> device_no <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;202506011234567890&#x27;</span>
+  <span class="hljs-keyword">AND</span> report_time <span class="hljs-operator">&gt;=</span> <span class="hljs-string">&#x27;2025-06-01 00:00:00&#x27;</span>
+  <span class="hljs-keyword">AND</span> report_time <span class="hljs-operator">&lt;</span>  <span class="hljs-string">&#x27;2025-06-02 00:00:00&#x27;</span>
+  <span class="hljs-keyword">AND</span> id <span class="hljs-operator">&gt;</span> :lastId
+<span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> id
+LIMIT <span class="hljs-number">1000</span>;
+</code></pre><h3 id="第二步-索引改造">第二步：索引改造</h3><pre><code class="language-sql"><span class="hljs-comment">-- 最新遥测查询高频，建联合索引</span>
+<span class="hljs-keyword">ALTER TABLE</span> t_device_realtime
+    <span class="hljs-keyword">ADD</span> INDEX idx_device_no_report_time (device_no, report_time);
+</code></pre><p>同时应用层保证类型一致，参数传 String，从源头避免隐式转换：</p>
+<pre><code class="language-java"><span class="hljs-comment">// 改造前：deviceNo 是 Long，MyBatis 拼出数字字面量，触发隐式转换</span>
+<span class="hljs-type">List</span>&lt;DeviceRealtime&gt; <span class="hljs-variable">list</span> <span class="hljs-operator">=</span> deviceRealtimeMapper.selectByDeviceNo(deviceNo, date);
+
+<span class="hljs-comment">// 改造后：统一 String 参数</span>
+<span class="hljs-type">List</span>&lt;DeviceRealtime&gt; <span class="hljs-variable">list</span> <span class="hljs-operator">=</span> deviceRealtimeMapper.selectByDeviceNo(String.valueOf(deviceNo), date);
+</code></pre><h3 id="第三步-限流兜底-快速失败">第三步：限流兜底 + 快速失败</h3><p>哪怕上面都做了，也要假设「下一次还会出幺蛾子」：</p>
+<pre><code class="language-yaml"><span class="hljs-attr">spring:</span>
+  <span class="hljs-attr">datasource:</span>
+    <span class="hljs-attr">hikari:</span>
+      <span class="hljs-attr">maximum-pool-size:</span> <span class="hljs-number">50</span>
+      <span class="hljs-attr">connection-timeout:</span> <span class="hljs-number">3000</span>   <span class="hljs-comment"># 30s → 3s，宁可快速失败也不无限排队</span>
+      <span class="hljs-attr">minimum-idle:</span> <span class="hljs-number">10</span>
+</code></pre><p>配合 Sentinel 给最新遥测/批量补采类接口加流控规则，超过阈值直接快速失败，保护设备采集主链路：</p>
+<pre><code class="language-java"><span class="hljs-meta">@SentinelResource(value = &quot;device-realtime-query&quot;, blockHandler = &quot;deviceRealtimeBlock&quot;)</span>
+<span class="hljs-keyword">public</span> <span class="hljs-type">List</span>&lt;DeviceRealtime&gt; <span class="hljs-title function_">realtimeQuery</span><span class="hljs-params">(...)</span> { ... }
+
+<span class="hljs-keyword">public</span> <span class="hljs-type">List</span>&lt;DeviceRealtime&gt; <span class="hljs-title function_">deviceRealtimeBlock</span><span class="hljs-params">(..., BlockException e)</span> {
+    log.warn(<span class="hljs-string">&quot;最新遥测查询触发限流，降级返回空&quot;</span>);
+    <span class="hljs-keyword">return</span> List.of();
+}
+</code></pre><h2 id="复盘总结">复盘总结</h2><ol>
+<li><strong>慢查询阈值默认 10s 太迟钝</strong>：上线第一天就该调到 1~2s 并配告警。这次前两次故障没定位到，一半原因是日志根本没记录。</li>
+<li><strong>加连接数是「应激反应」</strong>：凡是连接池打满，先问「连接在等什么」而不是「连接够不够」。看 <code>information_schema.processlist</code>、慢查询日志、<code>Threads_running</code>，再决定怎么动。</li>
+<li><strong>两类索引失效写法要写进规范</strong>：隐式类型转换、对列做函数运算。Code Review 时先扫一遍。</li>
+<li><strong>变更要有链路压测</strong>：批量补采任务上线前没有压测，是这次故障的导火索。大流量任务上线前必须在测试环境按峰值 1.5 倍压。</li>
+<li><strong>兜底永远要有</strong>：快速失败优于无限等待；熔断降级保护核心链路；告警要双通道（指标 + 日志关键词）。</li>
+</ol>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/oom-debug.html"><span>← 上一篇</span><b>JVM 内存泄漏排查实录：一次 Full GC 频发的救火经历</b></a>
+    <a class="pn-btn next" href="/post/api-optimization.html"><span>下一篇 →</span><b>接口性能优化：从 2 秒到 200 毫秒</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 锁机制：从行锁到死锁实战 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#从一次设备参数批量下发事故说起">从一次设备参数批量下发事故说起</a></li><li class="toc-l2"><a href="#锁的分类-从全局到行">锁的分类：从全局到行</a></li><li class="toc-l2"><a href="#innodb-行锁的三种形态">InnoDB 行锁的三种形态</a></li><li class="toc-l2"><a href="#幻读与-mvcc-一对互补的机制">幻读与 MVCC：一对互补的机制</a></li><li class="toc-l2"><a href="#java-业务里的悲观锁与乐观锁">Java 业务里的悲观锁与乐观锁</a></li><li class="toc-l2"><a href="#死锁实战-两个-update-的顺序问题">死锁实战：两个 UPDATE 的顺序问题</a></li><li class="toc-l2"><a href="#规避死锁的实践">规避死锁的实践</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">🗄️ 数据库</span></p>
+      <h1>MySQL 锁机制：从行锁到死锁实战</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2025-07-20</span>
+        <span class="meta-read">☕ 预计阅读 12 分钟</span>
+        <span class="meta-tags"><code>#MySQL</code> <code>#锁</code> <code>#InnoDB</code> <code>#死锁</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="从一次设备参数批量下发事故说起">从一次设备参数批量下发事故说起</h2><p>七月下旬的周日凌晨两点，监控告警：设备档案批量更新接口失败率飙到 40%。</p>
+<p>日志里躺着一行刺眼的异常：</p>
+<pre><code class="language-text">Deadlock found when trying to get lock; try restarting transaction
+</code></pre><p>一看代码，两段 UPDATE 更新设备校准配置：一个下发任务先更新设备 A 的配置再更新设备 B，另一个下发任务刚好反过来。两个事务各持一把锁互不相让，死锁了。</p>
+<p>这篇文章把 MySQL 的锁机制讲透：锁的分类、InnoDB 行锁的三种形态、和 Java 业务里的锁怎么配合，最后复盘这个死锁案例。</p>
+<h2 id="锁的分类-从全局到行">锁的分类：从全局到行</h2><p>MySQL 的锁按粒度从小到大分三层：</p>
+<table>
+<thead>
+<tr>
+<th>锁</th>
+<th>命令/时机</th>
+<th>影响</th>
+<th>使用场景</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>全局锁</td>
+<td><code>FLUSH TABLES WITH READ LOCK</code></td>
+<td>整个库只读</td>
+<td>全库备份（现在一般用 <code>--single-transaction</code> 代替）</td>
+</tr>
+<tr>
+<td>表锁</td>
+<td><code>LOCK TABLES ... READ/WRITE</code></td>
+<td>整张表阻塞</td>
+<td>MyISAM 时代；InnoDB 下基本不用</td>
+</tr>
+<tr>
+<td>行锁</td>
+<td>InnoDB 自动加</td>
+<td>只锁命中行</td>
+<td>OLTP 默认选择</td>
+</tr>
+</tbody></table>
+<p>还有个容易被忽略的<strong>元数据锁（MDL）</strong>：任何 DDL（ALTER TABLE）都要先拿 MDL 写锁，而一个未提交的长事务会一直占着 MDL 读锁——线上&quot;DDL 卡死&quot;十有八九是它。</p>
+<h2 id="innodb-行锁的三种形态">InnoDB 行锁的三种形态</h2><p>InnoDB 的行锁不是简单锁一行，它有三种形态：</p>
+<table>
+<thead>
+<tr>
+<th>形态</th>
+<th>全称</th>
+<th>锁什么</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Record Lock</td>
+<td>记录锁</td>
+<td>锁住索引上的一条记录</td>
+</tr>
+<tr>
+<td>Gap Lock</td>
+<td>间隙锁</td>
+<td>锁住两条索引记录之间的<strong>空隙</strong>，阻止插入</td>
+</tr>
+<tr>
+<td>Next-Key Lock</td>
+<td>临键锁</td>
+<td>记录锁 + 左侧间隙锁，<strong>左开右闭</strong>区间</td>
+</tr>
+</tbody></table>
+<p>举个具体的例子。表里有 id = 10、20、30 三条记录：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t <span class="hljs-keyword">WHERE</span> id <span class="hljs-keyword">BETWEEN</span> <span class="hljs-number">15</span> <span class="hljs-keyword">AND</span> <span class="hljs-number">25</span> <span class="hljs-keyword">FOR</span> <span class="hljs-keyword">UPDATE</span>;
+</code></pre><p>这条 SQL 会锁住 (10, 20] 和 (20, 30] 的临键锁区间。效果是：想插入 <code>id = 15</code>？不行，击中了 (10, 20) 的间隙锁，只能阻塞等待。</p>
+<p>为什么要这么设计？为了<strong>防幻读</strong>——RR（可重复读）隔离级别下，同一事务两次范围查询，不允许第二次多出&quot;幻影行&quot;。</p>
+<blockquote>
+<p>注意：间隙锁只在 RR 隔离级别下默认开启。如果业务不在乎可重复读，把隔离级别降到 RC（读已提交），间隙锁没了，死锁和锁等待的概率也会小很多，代价是 binlog 必须设成 ROW 模式才能保证主从安全。</p>
+</blockquote>
+<h2 id="幻读与-mvcc-一对互补的机制">幻读与 MVCC：一对互补的机制</h2><p>很多人把 MVCC 和加锁混在一起，其实它们各管一段：</p>
+<ul>
+<li><strong>MVCC（多版本并发控制）</strong>：解决<strong>快照读</strong>的隔离。普通 <code>SELECT</code> 走的是快照，看到的是事务开始时的数据，不加锁、不阻塞。</li>
+<li><strong>行锁/间隙锁</strong>：解决<strong>当前读</strong>的并发。<code>SELECT ... FOR UPDATE</code>、<code>UPDATE</code>、<code>DELETE</code> 都是当前读，必须加锁防止别人修改。</li>
+</ul>
+<p>一句话总结：<strong>快照读靠版本号，当前读靠锁</strong>。这也是为什么 RR 下普通 SELECT 永远不会幻读，而两个 <code>FOR UPDATE</code> 会互相阻塞。</p>
+<h2 id="java-业务里的悲观锁与乐观锁">Java 业务里的悲观锁与乐观锁</h2><p><strong>悲观锁：SELECT ... FOR UPDATE</strong></p>
+<p>适合冲突概率高的场景，比如下发设备校准参数：</p>
+<pre><code class="language-java"><span class="hljs-meta">@Transactional</span>
+<span class="hljs-keyword">public</span> <span class="hljs-type">boolean</span> <span class="hljs-title function_">pushCalibration</span><span class="hljs-params">(Long devId, BigDecimal value)</span> {
+    <span class="hljs-comment">// 直接锁住这行，别的下发任务想改得先等</span>
+    <span class="hljs-type">DeviceConfig</span> <span class="hljs-variable">config</span> <span class="hljs-operator">=</span> configMapper.selectByDevIdForUpdate(devId);
+    <span class="hljs-keyword">if</span> (config == <span class="hljs-literal">null</span>) {
+        <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">BizException</span>(<span class="hljs-string">&quot;设备档案不存在&quot;</span>);
+    }
+    config.setCalibration(value);
+    configMapper.updateById(config);
+    <span class="hljs-keyword">return</span> <span class="hljs-literal">true</span>;
+}
+</code></pre><p>对应的 SQL 是 <code>SELECT * FROM t_device_config WHERE dev_id = ? FOR UPDATE</code>。</p>
+<p>注意两点：一是<strong>WHERE 条件必须走索引</strong>，否则 InnoDB 只能把扫描到的所有行都锁上（等于表锁）；二是事务要尽快提交，锁的持有时间 = 事务存活时间。</p>
+<p><strong>乐观锁：版本号 CAS</strong></p>
+<p>适合冲突概率低的场景，比如设备固件版本/配置版本号更新：</p>
+<pre><code class="language-java"><span class="hljs-meta">@Transactional</span>
+<span class="hljs-keyword">public</span> <span class="hljs-type">boolean</span> <span class="hljs-title function_">upgradeFirmware</span><span class="hljs-params">(Long devId, Integer expectVersion)</span> {
+    <span class="hljs-type">int</span> <span class="hljs-variable">affected</span> <span class="hljs-operator">=</span> configMapper.casUpdateConfigVersion(
+        devId,                <span class="hljs-comment">// dev_id</span>
+        <span class="hljs-string">&quot;V1.0.0&quot;</span>, <span class="hljs-string">&quot;V1.0.1&quot;</span>,   <span class="hljs-comment">// 旧版本 -&gt; 新版本</span>
+        expectVersion         <span class="hljs-comment">// 期望版本号</span>
+    );
+    <span class="hljs-keyword">if</span> (affected == <span class="hljs-number">0</span>) {
+        <span class="hljs-comment">// 被别人改过了，重试或者提醒值班同事</span>
+        <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">BizException</span>(<span class="hljs-string">&quot;设备固件版本已更新，请刷新后重试&quot;</span>);
+    }
+    <span class="hljs-keyword">return</span> <span class="hljs-literal">true</span>;
+}
+</code></pre><pre><code class="language-sql"><span class="hljs-keyword">UPDATE</span> t_device_config
+<span class="hljs-keyword">SET</span> firmware_version <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;V1.0.1&#x27;</span>, config_version <span class="hljs-operator">=</span> config_version <span class="hljs-operator">+</span> <span class="hljs-number">1</span>
+<span class="hljs-keyword">WHERE</span> id <span class="hljs-operator">=</span> #{devId}
+  <span class="hljs-keyword">AND</span> firmware_version <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;V1.0.0&#x27;</span>
+  <span class="hljs-keyword">AND</span> config_version <span class="hljs-operator">=</span> #{expectVersion};
+</code></pre><p>受影响行数为 1 说明 CAS 成功，为 0 说明并发冲突，业务层选择重试或报错。</p>
+<p><strong>什么时候选哪个？</strong> 冲突多、写多读少 → 悲观锁；冲突少、读多写少 → 乐观锁。乐观锁在设备固件集中升级这种超高并发场景下反而容易大量失败重试，这时候很多人会改用 Redis 原子操作，又是另一个话题了。</p>
+<h2 id="死锁实战-两个-update-的顺序问题">死锁实战：两个 UPDATE 的顺序问题</h2><p>回到开头的下发事故。表结构很简单：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">CREATE TABLE</span> t_device_config (
+  id            <span class="hljs-type">BIGINT</span> <span class="hljs-keyword">PRIMARY KEY</span>,
+  dev_id        <span class="hljs-type">BIGINT</span>,
+  calibration   <span class="hljs-type">DECIMAL</span>(<span class="hljs-number">10</span>,<span class="hljs-number">2</span>),
+  KEY idx_dev_id (dev_id)
+);
+</code></pre><p>下发业务抽象成「给设备 A 下发配置，给设备 B 下发配置」：</p>
+<pre><code class="language-sql"><span class="hljs-comment">-- 下发任务 1</span>
+<span class="hljs-keyword">UPDATE</span> t_device_config <span class="hljs-keyword">SET</span> calibration <span class="hljs-operator">=</span> calibration <span class="hljs-operator">+</span> <span class="hljs-number">100</span> <span class="hljs-keyword">WHERE</span> dev_id <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;A&#x27;</span>;
+<span class="hljs-keyword">UPDATE</span> t_device_config <span class="hljs-keyword">SET</span> calibration <span class="hljs-operator">=</span> calibration <span class="hljs-operator">+</span> <span class="hljs-number">100</span> <span class="hljs-keyword">WHERE</span> dev_id <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;B&#x27;</span>;
+
+<span class="hljs-comment">-- 下发任务 2</span>
+<span class="hljs-keyword">UPDATE</span> t_device_config <span class="hljs-keyword">SET</span> calibration <span class="hljs-operator">=</span> calibration <span class="hljs-operator">+</span> <span class="hljs-number">100</span> <span class="hljs-keyword">WHERE</span> dev_id <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;B&#x27;</span>;
+<span class="hljs-keyword">UPDATE</span> t_device_config <span class="hljs-keyword">SET</span> calibration <span class="hljs-operator">=</span> calibration <span class="hljs-operator">+</span> <span class="hljs-number">100</span> <span class="hljs-keyword">WHERE</span> dev_id <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;A&#x27;</span>;
+</code></pre><p>两个事务并发时的执行过程：</p>
+<ol>
+<li>任务 1 锁住 A 的配置行，任务 2 锁住 B 的配置行；</li>
+<li>任务 1 要锁 B，被任务 2 占着，进入等待；</li>
+<li>任务 2 要锁 A，被任务 1 占着，进入等待；</li>
+<li><strong>环形等待，死锁形成</strong>。InnoDB 的死锁检测发现后，回滚代价较小的一方（任务 2），应用层收到 <code>Deadlock found when trying to get lock</code>。</li>
+</ol>
+<p>用 <code>SHOW ENGINE INNODB STATUS</code> 看死锁现场，关键段落长这样：</p>
+<pre><code class="language-text">------------------------
+LATEST DETECTED DEADLOCK
+------------------------
+2025-04-20 02:13:45 0x7f8c
+*** (1) TRANSACTION:
+TRANSACTION 520934, ACTIVE 12 sec starting index read
+mysql tables in use 1, locked 1
+LOCK WAIT 2 lock struct(s), heap size 1136, 1 row lock(s)
+MySQL thread id 88321, OS thread handle 14024, query id 7349211
+UPDATE t_device_config SET calibration = calibration + 100 WHERE dev_id = &#x27;A&#x27;
+*** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+RECORD LOCKS space id 58 page no 3 n bits 72
+index idx_dev_id of table `iot`.`t_device_config` trx id 520934
+lock_mode X locks rec but not gap waiting
+*** (2) TRANSACTION:
+TRANSACTION 520935, ACTIVE 8 sec starting index read
+mysql tables in use 1, locked 1
+3 lock struct(s), heap size 1136, 2 row lock(s)
+MySQL thread id 88322, OS handle 14025, query id 7349312
+UPDATE t_device_config SET calibration = calibration + 100 WHERE dev_id = &#x27;B&#x27;
+*** (2) HOLDS THE LOCK(S):
+RECORD LOCKS space id 58 page no 3 n bits 72
+index idx_dev_id of table `iot`.`t_device_config` trx id 520935
+lock_mode X locks rec but not gap
+*** (2) WAITING FOR THIS LOCK TO BE GRANTED:
+RECORD LOCKS space id 58 page no 3 n bits 72
+index idx_dev_id ... lock_mode X locks rec but not gap waiting
+*** WE ROLL BACK TRANSACTION (2)
+</code></pre><p>怎么读这份报告？三步：</p>
+<ol>
+<li>看 <code>(1) WAITING FOR THIS LOCK</code> 和 <code>(2) HOLDS THE LOCK(S)</code>——谁在等、锁被谁拿着，构成环路；</li>
+<li>看 <code>LATEST DETECTED DEADLOCK</code> 的时间戳和事务 id，回代码里定位是哪个事务；</li>
+<li>看最后一行的 <code>WE ROLL BACK TRANSACTION (2)</code>——MySQL 选择了回滚代价小的事务。</li>
+</ol>
+<h2 id="规避死锁的实践">规避死锁的实践</h2><p>踩过一次坑之后，我们定了四条铁律：</p>
+<p><strong>1. 统一加锁顺序</strong></p>
+<p>所有涉及多行更新的业务，按固定的键排序后再加锁：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">pushConfig</span><span class="hljs-params">(String devA, String devB)</span> {
+    <span class="hljs-comment">// 按 dev_id 字典序排序，两个方向的下发任务最终加锁顺序一致</span>
+    <span class="hljs-type">String</span> <span class="hljs-variable">lockFirst</span>  <span class="hljs-operator">=</span> devA.compareTo(devB) &lt; <span class="hljs-number">0</span> ? devA : devB;
+    <span class="hljs-type">String</span> <span class="hljs-variable">lockSecond</span> <span class="hljs-operator">=</span> devA.compareTo(devB) &lt; <span class="hljs-number">0</span> ? devB : devA;
+    <span class="hljs-comment">// 先锁 lockFirst 设备的配置行，再锁 lockSecond</span>
+    <span class="hljs-comment">// ...</span>
+}
+</code></pre><p>只要两个任务以相同的顺序拿锁，就不会出现环形等待。</p>
+<p><strong>2. 让 UPDATE 走上索引</strong></p>
+<p><code>WHERE dev_id = &#39;A&#39;</code> 若不命中索引，InnoDB 会把扫描到的所有行都加锁。上面死锁日志里锁的是 <code>idx_dev_id</code> 上的记录（<code>locks rec but not gap</code>），如果这里走了全表扫描，锁面会大得多，死锁概率成倍上升。</p>
+<p><strong>3. 缩短事务</strong></p>
+<p>事务里只放必要的 SQL，远程调用、文件操作一律挪出事务。锁持有时间越短，和别人撞车的窗口越小。</p>
+<p><strong>4. 保留重试机制</strong></p>
+<p>死锁是 InnoDB 主动检测并回滚的，应用层必须捕获 1213 错误码并重试：</p>
+<pre><code class="language-java"><span class="hljs-keyword">try</span> {
+    pushConfig(devA, devB);
+} <span class="hljs-keyword">catch</span> (CannotAcquireLockException e) {
+    <span class="hljs-keyword">if</span> (isDeadlock(e)) {
+        <span class="hljs-keyword">return</span> retry(<span class="hljs-number">3</span>); <span class="hljs-comment">// 最多重试 3 次</span>
+    }
+    <span class="hljs-keyword">throw</span> e;
+}
+</code></pre><p>最后说句题外话：<strong>死锁不一定全是坏事</strong>——它说明 InnoDB 的检测机制在工作，把&quot;锁等待超时&quot;这种更隐蔽的问题提前暴露出来。真正要警惕的是日志里没报错、但接口集体变慢的锁等待。</p>
+<p>锁到这里先告一段落，下一篇聊聊 MQTT 和物联网设备接入，换换口味。</p>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/design-patterns.html"><span>← 上一篇</span><b>Java 设计模式实战：单例、策略与模板方法</b></a>
+    <a class="pn-btn next" href="/post/mysql-index.html"><span>下一篇 →</span><b>MySQL 索引优化实战：从全表扫描到索引覆盖</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

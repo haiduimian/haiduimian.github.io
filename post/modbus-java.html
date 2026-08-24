@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Modbus 协议与 Java 实现：工业设备采集第一课 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#为什么工业现场绕不开-modbus">为什么工业现场绕不开 Modbus</a></li><li class="toc-l2"><a href="#rtu-与-tcp-两种最常见的载体">RTU 与 TCP：两种最常见的载体</a></li><li class="toc-l3"><a href="#rtu-帧格式">RTU 帧格式</a></li><li class="toc-l3"><a href="#tcp-帧格式-mbap-pdu">TCP 帧格式（MBAP + PDU）</a></li><li class="toc-l3"><a href="#功能码表-常用">功能码表（常用）</a></li><li class="toc-l2"><a href="#四类寄存器映射-先把地址空间搞清楚">四类寄存器映射：先把地址空间搞清楚</a></li><li class="toc-l2"><a href="#用-jlibmodbus-读保持寄存器-抄起来就能跑">用 jlibmodbus 读保持寄存器：抄起来就能跑</a></li><li class="toc-l3"><a href="#为什么用现成库而不是自己写">为什么用现成库而不是自己写</a></li><li class="toc-l3"><a href="#完整读取代码">完整读取代码</a></li><li class="toc-l3"><a href="#参数逐个解释">参数逐个解释</a></li><li class="toc-l2"><a href="#现场只有串口怎么办-rtu-master-初始化">现场只有串口怎么办：RTU Master 初始化</a></li><li class="toc-l2"><a href="#工程单位换算-原始值到真实物理量">工程单位换算：原始值到真实物理量</a></li><li class="toc-l2"><a href="#踩坑记录">踩坑记录</a></li><li class="toc-l3"><a href="#坑一-字节序高低位颠倒">坑一：字节序高低位颠倒</a></li><li class="toc-l3"><a href="#坑二-断连重连策略">坑二：断连重连策略</a></li><li class="toc-l3"><a href="#坑三-轮询周期与设备负载">坑三：轮询周期与设备负载</a></li><li class="toc-l2"><a href="#小结">小结</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">📡 工业物联网</span></p>
+      <h1>Modbus 协议与 Java 实现：工业设备采集第一课</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2025-09-05</span>
+        <span class="meta-read">☕ 预计阅读 18 分钟</span>
+        <span class="meta-tags"><code>#Modbus</code> <code>#PLC</code> <code>#工业协议</code> <code>#数据采集</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<blockquote>
+<p>这是我在某压铸厂「设备上云」项目里的采集笔记。目标是把 30 台 PLC 和
+60 多块电表的数据每 2 秒采一次上平台。第一周啃协议、第二周写代码、
+第三周和现场工程师对着点位表逐点核对。下面写的东西，都是当时真正踩过的坑。</p>
+</blockquote>
+<h2 id="为什么工业现场绕不开-modbus">为什么工业现场绕不开 Modbus</h2><p>Modbus 是 1979 年由 Modicon（后来的施耐德）发明的串行通信协议，1999 年成为公开规范。
+2025 年了你做任何工业采集项目，设备清单里大概率仍有七八成设备自带 Modbus 口：</p>
+<ul>
+<li><strong>中小型 PLC</strong>：西门子 S7-200 SMART、三菱 FX 系列、台达，几乎都内置 Modbus 从站；</li>
+<li><strong>智能电表</strong>：威胜、科陆、安科瑞的导轨表，标配 Modbus 电能读写；</li>
+<li><strong>现场仪表</strong>：流量计、温控器、压力变送器，多半有一个 RS485 + Modbus RTU 口。</li>
+</ul>
+<p>对比一下 OPC UA：OPC UA 解决的是工厂不同厂商系统之间<strong>语义互通</strong>的问题，它有信息
+建模、安全鉴权、订阅发布，适合 MES/SCADA 做异构集成。但对一块 200 块的流量计来说
+它太重了——跑不起来，也没有必要。所以真实工厂的现状是：<strong>现场粒度数据采集 Modbus
+打底，OPC UA 走上层网关做协议转换</strong>。做采集服务的人，Modbus 是绕不开的第一课。</p>
+<h2 id="rtu-与-tcp-两种最常见的载体">RTU 与 TCP：两种最常见的载体</h2><p>Modbus 本身是应用层协议，底下可以跑 RS-485 串口（RTU），也可以跑以太网（TCP）。
+两者的<strong>数据部分（PDU）完全一样</strong>，区别在封装和校验。</p>
+<h3 id="rtu-帧格式">RTU 帧格式</h3><table>
+<thead>
+<tr>
+<th>字段</th>
+<th>长度</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>从站地址</td>
+<td>1 字节</td>
+<td>1~247，0 为广播</td>
+</tr>
+<tr>
+<td>功能码</td>
+<td>1 字节</td>
+<td>03 表示读保持寄存器</td>
+</tr>
+<tr>
+<td>数据区</td>
+<td>N 字节</td>
+<td>参数 + 数据，随功能码变化</td>
+</tr>
+<tr>
+<td>CRC16</td>
+<td>2 字节</td>
+<td>多项式 0xA001，<strong>低字节在前</strong></td>
+</tr>
+</tbody></table>
+<p>帧与帧之间要求至少 3.5 个字符的空闲时间，9600 波特下约 4ms。下面这条是
+「读从站 1，保持寄存器偏移 0x6B（107）起 3 个寄存器」的完整报文：</p>
+<pre><code class="language-text">01 03 00 6B 00 03 68 0A
+│  │  └─地址┘ └─数量┘ │
+│  └─功能码            └─CRC16(低字节在前)
+└─从站地址
+</code></pre><p>CRC 是新手第一个坑：多项式、初值、字节序全对才拆得对包。后面给一段自写实现：</p>
+<pre><code class="language-java"><span class="hljs-comment">// MODBUS 标准 CRC16：多项式 0xA001，初值 0xFFFF，输出低字节在前</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> <span class="hljs-type">byte</span>[] <span class="hljs-title function_">crc16</span><span class="hljs-params">(<span class="hljs-type">byte</span>[] data)</span> {
+    <span class="hljs-type">int</span> <span class="hljs-variable">crc</span> <span class="hljs-operator">=</span> <span class="hljs-number">0xFFFF</span>;
+    <span class="hljs-keyword">for</span> (<span class="hljs-type">byte</span> b : data) {
+        crc ^= (b &amp; <span class="hljs-number">0xFF</span>);
+        <span class="hljs-keyword">for</span> (<span class="hljs-type">int</span> <span class="hljs-variable">i</span> <span class="hljs-operator">=</span> <span class="hljs-number">0</span>; i &lt; <span class="hljs-number">8</span>; i++) {
+            crc = (crc &amp; <span class="hljs-number">0x0001</span>) != <span class="hljs-number">0</span> ? (crc &gt;&gt; <span class="hljs-number">1</span>) ^ <span class="hljs-number">0xA001</span> : crc &gt;&gt; <span class="hljs-number">1</span>;
+        }
+    }
+    <span class="hljs-keyword">return</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">byte</span>[]{(<span class="hljs-type">byte</span>) (crc &amp; <span class="hljs-number">0xFF</span>), (<span class="hljs-type">byte</span>) ((crc &gt;&gt; <span class="hljs-number">8</span>) &amp; <span class="hljs-number">0xFF</span>)};
+}
+</code></pre><p>拿上面那条报文试：<code>01 03 00 6B 00 03</code> 的 CRC 算出来就是 <code>68 0A</code>，对不上就检查
+自己是不是把高低字节写反了。</p>
+<h3 id="tcp-帧格式-mbap-pdu">TCP 帧格式（MBAP + PDU）</h3><table>
+<thead>
+<tr>
+<th>字段</th>
+<th>长度</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>事务 ID</td>
+<td>2 字节</td>
+<td>请求/响应配对，一般自增</td>
+</tr>
+<tr>
+<td>协议 ID</td>
+<td>2 字节</td>
+<td>恒为 0x0000</td>
+</tr>
+<tr>
+<td>长度</td>
+<td>2 字节</td>
+<td>后面字节数 = 单元 ID + PDU</td>
+</tr>
+<tr>
+<td>单元 ID</td>
+<td>1 字节</td>
+<td>网关后面挂多台从站时用</td>
+</tr>
+<tr>
+<td>PDU</td>
+<td>N 字节</td>
+<td>功能码 + 数据，与 RTU 相同</td>
+</tr>
+</tbody></table>
+<p>TCP 走以太网自带校验，<strong>没有 CRC</strong>。单元 ID 在直连 PLC 时填 1 就行，走串口网关
+转接时它对应后面的从站地址。</p>
+<h3 id="功能码表-常用">功能码表（常用）</h3><table>
+<thead>
+<tr>
+<th>功能码</th>
+<th>名称</th>
+<th>操作对象</th>
+<th>读写</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>0x01</td>
+<td>读线圈 Read Coils</td>
+<td>线圈</td>
+<td>读</td>
+<td>位操作，一次最多 2000 位</td>
+</tr>
+<tr>
+<td>0x02</td>
+<td>读离散输入 Read Discrete Inputs</td>
+<td>离散输入</td>
+<td>只读</td>
+<td>位操作</td>
+</tr>
+<tr>
+<td>0x03</td>
+<td>读保持寄存器 Read Holding Registers</td>
+<td>保持寄存器</td>
+<td>读/写</td>
+<td>最常用，一次最多 125 个</td>
+</tr>
+<tr>
+<td>0x04</td>
+<td>读输入寄存器 Read Input Registers</td>
+<td>输入寄存器</td>
+<td>只读</td>
+<td>仪表测量值常用</td>
+</tr>
+<tr>
+<td>0x05</td>
+<td>写单个线圈 Write Single Coil</td>
+<td>线圈</td>
+<td>写</td>
+<td>FF00=ON，0000=OFF</td>
+</tr>
+<tr>
+<td>0x06</td>
+<td>写单个寄存器 Write Single Register</td>
+<td>保持寄存器</td>
+<td>写</td>
+<td>下设定值用</td>
+</tr>
+<tr>
+<td>0x0F(15)</td>
+<td>写多个线圈 Write Multiple Coils</td>
+<td>线圈</td>
+<td>写</td>
+<td></td>
+</tr>
+<tr>
+<td>0x10(16)</td>
+<td>写多个寄存器 Write Multiple Registers</td>
+<td>保持寄存器</td>
+<td>写</td>
+<td></td>
+</tr>
+</tbody></table>
+<p>采集项目里 90% 的流量是 03，写参数偶尔用 06/10。</p>
+<h2 id="四类寄存器映射-先把地址空间搞清楚">四类寄存器映射：先把地址空间搞清楚</h2><table>
+<thead>
+<tr>
+<th>PLC 地址区间</th>
+<th>类型</th>
+<th>读写</th>
+<th>数据精度</th>
+<th>典型用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>00001–09999</td>
+<td>线圈 Coil</td>
+<td>可读可写</td>
+<td>1 bit</td>
+<td>启停命令、故障复位</td>
+</tr>
+<tr>
+<td>10001–19999</td>
+<td>离散输入 Discrete Input</td>
+<td>只读</td>
+<td>1 bit</td>
+<td>限位开关、运行状态</td>
+</tr>
+<tr>
+<td>30001–39999</td>
+<td>输入寄存器 Input Register</td>
+<td>只读</td>
+<td>16 bit</td>
+<td>电流、频率等测量值</td>
+</tr>
+<tr>
+<td>40001–49999</td>
+<td>保持寄存器 Holding Register</td>
+<td>可读可写</td>
+<td>16 bit</td>
+<td>设定值、累计量</td>
+</tr>
+</tbody></table>
+<p><strong>最经典的坑在这里</strong>：PLC 屏幕上显示「40001」，协议里的偏移却是 <strong>0</strong>。也就是说
+读 40001 寄存器，传给库的起始地址是 <code>40001 - 40001 = 0</code>；读 40100，协议地址是 99。
+有些设备手册直接给十六进制偏移，比如 0x6B，那就别再做减法，直接用。</p>
+<h2 id="用-jlibmodbus-读保持寄存器-抄起来就能跑">用 jlibmodbus 读保持寄存器：抄起来就能跑</h2><h3 id="为什么用现成库而不是自己写">为什么用现成库而不是自己写</h3><p>自己写 Modbus 主站不是不行，但要处理的东西比想象多：CRC 高低字节、串口超时、
+半包拆包、异常码映射、重连……第一版自写主站上线当天就被现场 90ms 超时的老 PLC
+干趴了。jlibmodbus 是纯 Java、开源、同时支持 TCP/RTU/RTU-over-TCP，够用。备选有
+modbus4j（功能全但更新慢）和 Jamod（2010 年后基本不维护，别用）。</p>
+<p>依赖走 JitPack（正式仓库里没有，这也常被新人卡住）：</p>
+<pre><code class="language-xml"><span class="hljs-tag">&lt;<span class="hljs-name">repositories</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">repository</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">id</span>&gt;</span>jitpack.io<span class="hljs-tag">&lt;/<span class="hljs-name">id</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">url</span>&gt;</span>https://jitpack.io<span class="hljs-tag">&lt;/<span class="hljs-name">url</span>&gt;</span>
+    <span class="hljs-tag">&lt;/<span class="hljs-name">repository</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">repositories</span>&gt;</span>
+
+<span class="hljs-tag">&lt;<span class="hljs-name">dependency</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">groupId</span>&gt;</span>com.github.kochedykov<span class="hljs-tag">&lt;/<span class="hljs-name">groupId</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">artifactId</span>&gt;</span>jlibmodbus<span class="hljs-tag">&lt;/<span class="hljs-name">artifactId</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">version</span>&gt;</span>1.2.9.1<span class="hljs-tag">&lt;/<span class="hljs-name">version</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">dependency</span>&gt;</span>
+</code></pre><blockquote>
+<p>版本以项目主页（github.com/kochedykov/jlibmodbus）为准；老版本 API 略有出入，
+见过旧教程里用 <code>getTransport().openConnection()</code>，1.2.x 统一用 <code>connect()</code>。</p>
+</blockquote>
+<h3 id="完整读取代码">完整读取代码</h3><pre><code class="language-java"><span class="hljs-keyword">import</span> com.serotonin.modbus4j.ModbusMaster;
+<span class="hljs-keyword">import</span> com.serotonin.modbus4j.ModbusMasterFactory;
+</code></pre><p>等等，上面是 modbus4j 的包名，jlibmodbus 的包名不一样，别混：</p>
+<pre><code class="language-java"><span class="hljs-keyword">import</span> com.intelligt.modbus.jlibmodbus.ModbusMaster;
+<span class="hljs-keyword">import</span> com.intelligt.modbus.jlibmodbus.ModbusMasterFactory;
+<span class="hljs-keyword">import</span> com.intelligt.modbus.jlibmodbus.exception.ModbusIOException;
+<span class="hljs-keyword">import</span> com.intelligt.modbus.jlibmodbus.exception.ModbusProtocolException;
+
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">ReadHoldingRegistersSample</span> {
+
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> <span class="hljs-type">void</span> <span class="hljs-title function_">main</span><span class="hljs-params">(String[] args)</span> {
+        <span class="hljs-comment">// 采集服务器访问 PLC 的 502 端口（Modbus TCP 标准端口）</span>
+        <span class="hljs-type">ModbusMaster</span> <span class="hljs-variable">master</span> <span class="hljs-operator">=</span> ModbusMasterFactory.createModbusMasterTCP(<span class="hljs-string">&quot;192.168.1.100&quot;</span>, <span class="hljs-number">502</span>);
+
+        <span class="hljs-keyword">try</span> {
+            master.connect();
+
+            <span class="hljs-comment">// 读从站 1：保持寄存器偏移 0（PLC 屏上显示 40001），读 3 个</span>
+            <span class="hljs-type">int</span>[] <span class="hljs-variable">values</span> <span class="hljs-operator">=</span> master.readHoldingRegisters(<span class="hljs-number">1</span>, <span class="hljs-number">0</span>, <span class="hljs-number">3</span>);
+
+            <span class="hljs-keyword">for</span> (<span class="hljs-type">int</span> <span class="hljs-variable">i</span> <span class="hljs-operator">=</span> <span class="hljs-number">0</span>; i &lt; values.length; i++) {
+                System.out.printf(<span class="hljs-string">&quot;寄存器 400%02d = %d%n&quot;</span>, i + <span class="hljs-number">1</span>, values[i]);
+            }
+        } <span class="hljs-keyword">catch</span> (ModbusProtocolException e) {
+            <span class="hljs-comment">// 从站返回异常码：01 非法功能码 / 02 非法地址 / 03 非法数据 / 04 从站故障</span>
+            System.err.println(<span class="hljs-string">&quot;从站返回异常: &quot;</span> + e.getExceptionCode());
+        } <span class="hljs-keyword">catch</span> (ModbusIOException e) {
+            <span class="hljs-comment">// 网络超时/断连都归这一类，重连逻辑就在这补</span>
+            System.err.println(<span class="hljs-string">&quot;IO 异常: &quot;</span> + e.getMessage());
+        } <span class="hljs-keyword">finally</span> {
+            <span class="hljs-keyword">try</span> { master.disconnect(); } <span class="hljs-keyword">catch</span> (Exception ignored) {}
+        }
+    }
+}
+</code></pre><h3 id="参数逐个解释">参数逐个解释</h3><ul>
+<li><code>createModbusMasterTCP(host, port)</code>：直连 PLC 时 port 填 502；走网关/防火墙口填
+实际映射端口，也有设备用 1502；</li>
+<li><code>readHoldingRegisters(serverId, startAddress, quantity)</code>：<ul>
+<li><code>serverId</code> = 从站地址。直连 PLC 通常为 1；网关后面挂多台从站时对着点位表填；</li>
+<li><code>startAddress</code> = <strong>协议偏移</strong>，不是 PLC 屏上的地址，见上文 40001 的坑；</li>
+<li><code>quantity</code> = 寄存器个数，1~125（Modbus 规范上限）。</li>
+</ul>
+</li>
+<li>返回值 <code>int[]</code>：每个元素是 16 位无符号值 0~65535。怎么变成物理量，见「工程单位换算」。</li>
+</ul>
+<h2 id="现场只有串口怎么办-rtu-master-初始化">现场只有串口怎么办：RTU Master 初始化</h2><p>很多厂里设备不上网，PLC 和电表挂在一条 RS-485 总线上。这时代码长相完全不同，
+要指定串口参数，最常见的组合是 <strong>9600 / 8 / N / 1</strong>（波特率 9600、数据位 8、
+无校验、停止位 1）：</p>
+<pre><code class="language-java"><span class="hljs-keyword">import</span> com.intelligt.modbus.jlibmodbus.ModbusMaster;
+<span class="hljs-keyword">import</span> com.intelligt.modbus.jlibmodbus.ModbusMasterFactory;
+<span class="hljs-keyword">import</span> com.intelligt.modbus.jlibmodbus.serial.ModbusSerialParameters;
+
+<span class="hljs-type">ModbusSerialParameters</span> <span class="hljs-variable">params</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ModbusSerialParameters</span>();
+params.setPortName(<span class="hljs-string">&quot;COM3&quot;</span>);                                   <span class="hljs-comment">// Windows；Linux 用 /dev/ttyUSB0</span>
+params.setBaudRate(ModbusSerialParameters.BAUDRATE_9600);
+params.setDataBits(<span class="hljs-number">8</span>);
+params.setStopBits(<span class="hljs-number">1</span>);
+params.setParity(ModbusSerialParameters.NO_PARITY);           <span class="hljs-comment">// N=无校验</span>
+
+<span class="hljs-type">ModbusMaster</span> <span class="hljs-variable">master</span> <span class="hljs-operator">=</span> ModbusMasterFactory.createModbusMasterRTU(params);
+master.connect();                                             <span class="hljs-comment">// 打开串口（阻塞）</span>
+<span class="hljs-type">int</span>[] <span class="hljs-variable">values</span> <span class="hljs-operator">=</span> master.readHoldingRegisters(<span class="hljs-number">1</span>, <span class="hljs-number">0</span>, <span class="hljs-number">10</span>);         <span class="hljs-comment">// 后续调用与 TCP 一致</span>
+</code></pre><p>几个串口的现实问题：</p>
+<ul>
+<li>电脑没串口就用 USB-RS485 转换器，Linux 下枚举成 <code>/dev/ttyUSB0</code>，要注意权限；</li>
+<li>9600 波特率下一个字节约 1.15ms，读 10 个寄存器的事务往返约 30~80ms。轮询多台
+设备时先算时间预算（见后面的坑三）；</li>
+<li>RS-485 是<strong>一主多从</strong>，同一时间只能有一个主站发言，调试期间别让两台电脑同时
+挂在总线上读同一台设备，会互相干扰把从站搞&quot;卡死&quot;。</li>
+</ul>
+<h2 id="工程单位换算-原始值到真实物理量">工程单位换算：原始值到真实物理量</h2><p>寄存器里的 16 位整数通常不是物理量本身，要按点位表乘缩放系数。比如温度：</p>
+<pre><code class="language-java"><span class="hljs-comment">// 点位表：40001 = 1# 压铸机模温，缩放系数 0.1，单位 ℃，可正可负</span>
+<span class="hljs-type">int</span> <span class="hljs-variable">raw</span> <span class="hljs-operator">=</span> master.readHoldingRegisters(<span class="hljs-number">1</span>, <span class="hljs-number">0</span>, <span class="hljs-number">1</span>)[<span class="hljs-number">0</span>];
+
+<span class="hljs-comment">// 注意：PLC 里 -50 存成 0xFFCE。raw 是无符号读上来的 65486，直接乘 0.1 就错了</span>
+<span class="hljs-type">short</span> <span class="hljs-variable">signed</span> <span class="hljs-operator">=</span> (<span class="hljs-type">short</span>) raw;            <span class="hljs-comment">// 强转成有符号 int16</span>
+<span class="hljs-type">double</span> <span class="hljs-variable">temp</span> <span class="hljs-operator">=</span> signed * <span class="hljs-number">0.1</span>;            <span class="hljs-comment">// -5.0 ℃，而不是 6548.6</span>
+
+System.out.printf(<span class="hljs-string">&quot;模温 = %.1f ℃%n&quot;</span>, temp);
+</code></pre><p>负温/负压场景下，<strong>先把 uint16 按 int16 解释再换算</strong>，这是点位核对时最容易翻车
+的一步。另外不少进口仪表把 32 位浮点拆到两个寄存器里，字节序还有 ABC D 和
+CD AB 两种排法，遇到双寄存器点位时先拿已知值验一遍再批量接。</p>
+<h2 id="踩坑记录">踩坑记录</h2><h3 id="坑一-字节序高低位颠倒">坑一：字节序高低位颠倒</h3><p>调试时读 40002 压力，点位表写着应该 5.0MPa，读回来 0x0500 即 1280。原因是设备
+按<strong>高低字节反着存</strong>，或者读回来低字节在前。两个寄存器以上的点位（32 位整数、
+浮点）先打印原始字节确认：</p>
+<pre><code class="language-java"><span class="hljs-type">int</span> <span class="hljs-variable">raw</span> <span class="hljs-operator">=</span> values[<span class="hljs-number">0</span>];
+<span class="hljs-type">int</span> <span class="hljs-variable">swapped</span> <span class="hljs-operator">=</span> ((raw &amp; <span class="hljs-number">0xFF</span>) &lt;&lt; <span class="hljs-number">8</span>) | ((raw &gt;&gt; <span class="hljs-number">8</span>) &amp; <span class="hljs-number">0xFF</span>);   <span class="hljs-comment">// 交换高低字节</span>
+</code></pre><p>引脚表核对：<strong>先确认单寄存器点位没错，再怀疑字节序；先确认字节序，再怀疑缩放
+系数</strong>，别上来就改代码。</p>
+<h3 id="坑二-断连重连策略">坑二：断连重连策略</h3><p>PLC 重启、网线松动、网关断电都会让 TCP 连接失效。ModbusIOException 一出现就要
+走重连，而且<strong>退避重试</strong>，别死循环猛连把设备/网关打挂：</p>
+<pre><code class="language-java"><span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">final</span> <span class="hljs-type">int</span> <span class="hljs-variable">MAX_RETRY</span> <span class="hljs-operator">=</span> <span class="hljs-number">5</span>;
+<span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">final</span> <span class="hljs-type">long</span> <span class="hljs-variable">BASE_BACKOFF_MS</span> <span class="hljs-operator">=</span> <span class="hljs-number">1000</span>;
+
+<span class="hljs-type">int</span>[] <span class="hljs-title function_">readWithRetry</span><span class="hljs-params">(ModbusMaster master, <span class="hljs-type">int</span> slaveId, <span class="hljs-type">int</span> addr, <span class="hljs-type">int</span> qty)</span> <span class="hljs-keyword">throws</span> ModbusIOException {
+    <span class="hljs-keyword">for</span> (<span class="hljs-type">int</span> <span class="hljs-variable">i</span> <span class="hljs-operator">=</span> <span class="hljs-number">0</span>; i &lt; MAX_RETRY; i++) {
+        <span class="hljs-keyword">try</span> {
+            <span class="hljs-keyword">if</span> (!master.isConnected()) {
+                master.connect();
+            }
+            <span class="hljs-keyword">return</span> master.readHoldingRegisters(slaveId, addr, qty);
+        } <span class="hljs-keyword">catch</span> (ModbusIOException e) {
+            log.warn(<span class="hljs-string">&quot;第 {} 次读取失败: {}&quot;</span>, i + <span class="hljs-number">1</span>, e.getMessage());
+            quietDisconnect(master);
+            sleep(BASE_BACKOFF_MS &lt;&lt; i);   <span class="hljs-comment">// 1s, 2s, 4s, 8s, 16s</span>
+        }
+    }
+    <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ModbusIOException</span>(<span class="hljs-string">&quot;连续 &quot;</span> + MAX_RETRY + <span class="hljs-string">&quot; 次读取失败，设备可能下线&quot;</span>);
+}
+</code></pre><p>串口设备重连还要记得把串口<strong>彻底关闭再打开</strong>，USB 转接头在打开失败后等 1~2 秒
+再重试，否则端口会一直报 busy。</p>
+<h3 id="坑三-轮询周期与设备负载">坑三：轮询周期与设备负载</h3><p>轮询不是越快越好。几个实测结论：</p>
+<ul>
+<li>老 PLC（S7-200 SMART 这类）单事务处理要 10~50ms，轮询间隔低于 200ms 时偶发
+无响应；</li>
+<li>9600 波特率下 60 台设备一轮全查要 2~5 秒，想 2 秒周期要么把慢速表单独拆出去
+降频，要么升 19200/38400，要么设备改走 TCP；</li>
+<li><strong>错峰</strong>：每台设备轮询起点加个固定偏移（如 <code>deviceIndex * 300ms</code>），否则所有
+设备同时发请求，串口忙不过来，看波形全是间隔 11ms 的密集包。</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>我的最终取值</th>
+<th>理由</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>TCP 轮询间隔</td>
+<td>1000ms</td>
+<td>PLC 处理能力 + 平台 2s 周期有余量</td>
+</tr>
+<tr>
+<td>RTU 轮询间隔</td>
+<td>500ms</td>
+<td>单事务 ~40ms，60 台一轮 ~2.4s</td>
+</tr>
+<tr>
+<td>读超时</td>
+<td>1000ms</td>
+<td>小于轮询间隔，避免重试堆积</td>
+</tr>
+<tr>
+<td>CRC 校验失败重发</td>
+<td>1 次</td>
+<td>串口受干扰常见，多试反而拖慢</td>
+</tr>
+</tbody></table>
+<h2 id="小结">小结</h2><p>Modbus 不难，难在那些&quot;不说就不知道&quot;的细节：40001 对 0 偏移、CRC 低字节在前、
+uint16 与 int16、字节序、重连策略、轮询预算。把这篇文章里的表格和代码过一遍，
+去现场接第一台 PLC，应该能少走一半弯路。下一篇我会写这条链路的后半段：采集到
+的数据怎么经过消息队列批量落库，做成一整套采集平台。原文 <code>modbus-java</code>，欢迎
+收藏。</p>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/mqtt-java.html"><span>← 上一篇</span><b>MQTT 协议与 Java 实战：物联网设备接入</b></a>
+    <a class="pn-btn next" href="/post/design-patterns.html"><span>下一篇 →</span><b>Java 设计模式实战：单例、策略与模板方法</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

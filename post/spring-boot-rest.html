@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spring Boot 从零搭建 RESTful API · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#rest-接口规范">REST 接口规范</a></li><li class="toc-l2"><a href="#项目结构">项目结构</a></li><li class="toc-l2"><a href="#分层职责">分层职责</a></li><li class="toc-l2"><a href="#参数校验与统一异常">参数校验与统一异常</a></li><li class="toc-l2"><a href="#完整-crud-示例">完整 CRUD 示例</a></li><li class="toc-l2"><a href="#统一响应体">统一响应体</a></li><li class="toc-l2"><a href="#分页">分页</a></li><li class="toc-l2"><a href="#小结">小结</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">☕ Java 核心</span></p>
+      <h1>Spring Boot 从零搭建 RESTful API</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2025-01-10</span>
+        <span class="meta-read">☕ 预计阅读 10 分钟</span>
+        <span class="meta-tags"><code>#Spring Boot</code> <code>#REST</code> <code>#API</code> <code>#MyBatis</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<blockquote>
+<p>这是仿照原博客「DRF（Django REST Framework）学习笔记」的 Java 版本。原笔记讲 REST 规范与 Django 序列化器，这里用 <strong>Spring Boot 3 + MyBatis</strong> 重写一遍：规范是通用的，框架换成 Java 生态。</p>
+</blockquote>
+<h2 id="rest-接口规范">REST 接口规范</h2><p><strong>非 REST 设计</strong>，很多人习惯用动词 URL：</p>
+<pre><code class="language-plaintext"><span class="hljs-keyword">GET</span>    /<span class="hljs-keyword">admin</span>/getUser    查询用户
+POST   /<span class="hljs-keyword">admin</span>/addUser    新增用户
+POST   /<span class="hljs-keyword">admin</span>/updateUser 更新用户
+POST   /<span class="hljs-keyword">admin</span>/deleteUser 删除用户
+</code></pre><p>问题很明显：URL 用动词描述动作，一个资源对应一堆接口，语义混乱。</p>
+<p><strong>REST 设计</strong>，URL 只描述资源，用 HTTP 方法表达动作：</p>
+<pre><code class="language-plaintext">GET    /api/users       查询用户列表
+GET    /api/users/{<span class="hljs-built_in">id</span>}  查询单个用户
+POST   /api/users       新增用户
+PUT    /api/users/{<span class="hljs-built_in">id</span>}  更新用户
+DELETE /api/users/{<span class="hljs-built_in">id</span>}  删除用户
+</code></pre><p>要点：</p>
+<ul>
+<li><strong>面向资源</strong>：URL 全部是名词复数，动词交给 HTTP 方法</li>
+<li><strong>HTTP 状态码表达结果</strong>：201 创建成功、404 资源不存在、409 冲突、422 校验失败</li>
+<li><strong>无状态</strong>：服务端不保存客户端会话状态（JWT / Token 自行携带）</li>
+</ul>
+<h2 id="项目结构">项目结构</h2><pre><code class="language-plaintext"><span class="hljs-keyword">com</span>.example.blog
+├── controller   <span class="hljs-meta"># 控制器层：接收请求、返回响应</span>
+├── service      <span class="hljs-meta"># 业务层：事务、业务规则</span>
+├── mapper       <span class="hljs-meta"># 数据访问层：MyBatis 接口 + XML</span>
+├── entity       <span class="hljs-meta"># 实体类</span>
+├── dto          <span class="hljs-meta"># 请求/响应对象（VO）</span>
+└── exception    <span class="hljs-meta"># 统一异常与全局处理器</span>
+</code></pre><h2 id="分层职责">分层职责</h2><table>
+<thead>
+<tr>
+<th>层</th>
+<th>职责</th>
+<th>常见坑</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Controller</td>
+<td>参数绑定、调用 service、返回 DTO</td>
+<td>在 Controller 里写业务逻辑</td>
+</tr>
+<tr>
+<td>Service</td>
+<td>事务边界、业务规则</td>
+<td>事务方法内部调用 this 的同名私有方法导致事务失效</td>
+</tr>
+<tr>
+<td>Mapper</td>
+<td>只做 SQL</td>
+<td>把 SQL 拼在 Java 字符串里</td>
+</tr>
+</tbody></table>
+<h2 id="参数校验与统一异常">参数校验与统一异常</h2><p>DTO 上加 Bean Validation 注解：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">record</span> <span class="hljs-title class_">UserCreateDTO</span><span class="hljs-params">(
+    @NotBlank(message = &quot;用户名不能为空&quot;)</span> String username,
+    <span class="hljs-meta">@Email(message = &quot;邮箱格式不正确&quot;)</span> String email,
+    <span class="hljs-meta">@Min(value = 1, message = &quot;年龄必须大于 0&quot;)</span> Integer age
+) {}
+</code></pre><p>全局异常处理器统一兜底：</p>
+<pre><code class="language-java"><span class="hljs-meta">@RestControllerAdvice</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">GlobalExceptionHandler</span> {
+
+    <span class="hljs-meta">@ExceptionHandler(MethodArgumentNotValidException.class)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">ResponseEntity</span>&lt;ApiResult&lt;Void&gt;&gt; <span class="hljs-title function_">handleValid</span><span class="hljs-params">(MethodArgumentNotValidException e)</span> {
+        <span class="hljs-type">String</span> <span class="hljs-variable">msg</span> <span class="hljs-operator">=</span> e.getBindingResult().getFieldErrors().stream()
+                .map(FieldError::getDefaultMessage)
+                .collect(Collectors.joining(<span class="hljs-string">&quot;; &quot;</span>));
+        <span class="hljs-keyword">return</span> ResponseEntity.badRequest().body(ApiResult.error(<span class="hljs-number">400</span>, msg));
+    }
+
+    <span class="hljs-meta">@ExceptionHandler(BusinessException.class)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">ResponseEntity</span>&lt;ApiResult&lt;Void&gt;&gt; <span class="hljs-title function_">handleBusiness</span><span class="hljs-params">(BusinessException e)</span> {
+        <span class="hljs-keyword">return</span> ResponseEntity.status(e.getCode()).body(ApiResult.error(e.getCode(), e.getMessage()));
+    }
+
+    <span class="hljs-meta">@ExceptionHandler(Exception.class)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">ResponseEntity</span>&lt;ApiResult&lt;Void&gt;&gt; <span class="hljs-title function_">handleOther</span><span class="hljs-params">(Exception e)</span> {
+        log.error(<span class="hljs-string">&quot;Unhandled exception&quot;</span>, e);
+        <span class="hljs-keyword">return</span> ResponseEntity.status(<span class="hljs-number">500</span>).body(ApiResult.error(<span class="hljs-number">500</span>, <span class="hljs-string">&quot;服务器内部错误&quot;</span>));
+    }
+}
+</code></pre><p>这样 Controller 里就不用写 try-catch，业务代码干净很多。</p>
+<h2 id="完整-crud-示例">完整 CRUD 示例</h2><pre><code class="language-java"><span class="hljs-meta">@RestController</span>
+<span class="hljs-meta">@RequestMapping(&quot;/api/users&quot;)</span>
+<span class="hljs-meta">@RequiredArgsConstructor</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">UserController</span> {
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> UserService userService;
+
+    <span class="hljs-meta">@GetMapping</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">ApiResult</span>&lt;List&lt;UserVO&gt;&gt; <span class="hljs-title function_">list</span><span class="hljs-params">()</span> {
+        <span class="hljs-keyword">return</span> ApiResult.success(userService.list());
+    }
+
+    <span class="hljs-meta">@GetMapping(&quot;/{id}&quot;)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">ApiResult</span>&lt;UserVO&gt; <span class="hljs-title function_">get</span><span class="hljs-params">(<span class="hljs-meta">@PathVariable</span> Long id)</span> {
+        <span class="hljs-keyword">return</span> ApiResult.success(userService.getById(id));
+    }
+
+    <span class="hljs-meta">@PostMapping</span>
+    <span class="hljs-meta">@ResponseStatus(HttpStatus.CREATED)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">ApiResult</span>&lt;UserVO&gt; <span class="hljs-title function_">create</span><span class="hljs-params">(<span class="hljs-meta">@Valid</span> <span class="hljs-meta">@RequestBody</span> UserCreateDTO dto)</span> {
+        <span class="hljs-keyword">return</span> ApiResult.success(userService.create(dto));
+    }
+
+    <span class="hljs-meta">@PutMapping(&quot;/{id}&quot;)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">ApiResult</span>&lt;UserVO&gt; <span class="hljs-title function_">update</span><span class="hljs-params">(<span class="hljs-meta">@PathVariable</span> Long id,
+                                    <span class="hljs-meta">@Valid</span> <span class="hljs-meta">@RequestBody</span> UserUpdateDTO dto)</span> {
+        <span class="hljs-keyword">return</span> ApiResult.success(userService.update(id, dto));
+    }
+
+    <span class="hljs-meta">@DeleteMapping(&quot;/{id}&quot;)</span>
+    <span class="hljs-meta">@ResponseStatus(HttpStatus.NO_CONTENT)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">delete</span><span class="hljs-params">(<span class="hljs-meta">@PathVariable</span> Long id)</span> {
+        userService.delete(id);
+    }
+}
+</code></pre><p>Service 层做事务控制：</p>
+<pre><code class="language-java"><span class="hljs-meta">@Service</span>
+<span class="hljs-meta">@RequiredArgsConstructor</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">UserService</span> {
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> UserMapper userMapper;
+
+    <span class="hljs-meta">@Transactional</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">UserVO</span> <span class="hljs-title function_">create</span><span class="hljs-params">(UserCreateDTO dto)</span> {
+        <span class="hljs-type">User</span> <span class="hljs-variable">user</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">User</span>();
+        user.setUsername(dto.username());
+        user.setEmail(dto.email());
+        userMapper.insert(user);   <span class="hljs-comment">// 插入用户</span>
+        userMapper.insertLog(<span class="hljs-string">&quot;user.create&quot;</span>, user.getId()); <span class="hljs-comment">// 记录操作日志</span>
+        <span class="hljs-keyword">return</span> UserVO.from(user);
+    }
+}
+</code></pre><blockquote>
+<p>⚠️ 容易踩的坑：<code>@Transactional</code> 加在<strong>私有方法</strong>上不生效；同类内部 <code>this</code> 调用也不会走代理。事务要放在 public 方法上，且通过外部 Bean 调用。</p>
+</blockquote>
+<h2 id="统一响应体">统一响应体</h2><pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">record</span> <span class="hljs-title class_">ApiResult</span>&lt;T&gt;(<span class="hljs-type">int</span> code, String message, T data) {
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> &lt;T&gt; <span class="hljs-type">ApiResult</span>&lt;T&gt; <span class="hljs-title function_">success</span><span class="hljs-params">(T data)</span> {
+        <span class="hljs-keyword">return</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ApiResult</span>&lt;&gt;(<span class="hljs-number">0</span>, <span class="hljs-string">&quot;ok&quot;</span>, data);
+    }
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> &lt;T&gt; <span class="hljs-type">ApiResult</span>&lt;T&gt; <span class="hljs-title function_">error</span><span class="hljs-params">(<span class="hljs-type">int</span> code, String message)</span> {
+        <span class="hljs-keyword">return</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ApiResult</span>&lt;&gt;(code, message, <span class="hljs-literal">null</span>);
+    }
+}
+</code></pre><h2 id="分页">分页</h2><pre><code class="language-java"><span class="hljs-meta">@GetMapping</span>
+<span class="hljs-keyword">public</span> <span class="hljs-type">ApiResult</span>&lt;PageResult&lt;UserVO&gt;&gt; <span class="hljs-title function_">page</span><span class="hljs-params">(<span class="hljs-meta">@RequestParam(defaultValue = &quot;1&quot;)</span> <span class="hljs-type">int</span> page,
+                                          <span class="hljs-meta">@RequestParam(defaultValue = &quot;10&quot;)</span> <span class="hljs-type">int</span> size)</span> {
+    PageHelper.startPage(page, size);
+    <span class="hljs-type">List</span>&lt;User&gt; <span class="hljs-variable">list</span> <span class="hljs-operator">=</span> userMapper.selectAll();
+    <span class="hljs-type">PageInfo</span>&lt;User&gt; <span class="hljs-variable">info</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">PageInfo</span>&lt;&gt;(list);
+    <span class="hljs-keyword">return</span> ApiResult.success(PageResult.of(info.getList(), info.getTotal(), page, size));
+}
+</code></pre><h2 id="小结">小结</h2><ul>
+<li>URL 面向资源，方法表达动作，状态码表达结果</li>
+<li>分层清晰：Controller 薄、Service 管事务、Mapper 管 SQL</li>
+<li>参数校验 + 全局异常，Controller 里不写 try-catch</li>
+<li>统一响应体，前端对接省心</li>
+</ul>
+<p>REST 规范与语言无关，Django 的 DRF 和 Spring Boot 只是不同实现。换到 Java 生态后，重点变成：注解驱动、事务代理机制、以及 MyBatis 的 XML 映射。</p>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/java-concurrency.html"><span>← 上一篇</span><b>Java 并发编程：多线程与线程池</b></a>
+    <span></span>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

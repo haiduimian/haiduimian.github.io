@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spring AI 实战：构建本地 RAG 知识问答 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#为什么突然要写这篇">为什么突然要写这篇</a></li><li class="toc-l2"><a href="#rag-是什么-为什么需要它">RAG 是什么，为什么需要它</a></li><li class="toc-l2"><a href="#为什么选-spring-ai-而不是自己拼">为什么选 Spring AI 而不是自己拼</a></li><li class="toc-l2"><a href="#环境准备-ollama-本地模型">环境准备：Ollama 本地模型</a></li><li class="toc-l2"><a href="#项目骨架与依赖">项目骨架与依赖</a></li><li class="toc-l2"><a href="#配置-application-yml">配置 application.yml</a></li><li class="toc-l2"><a href="#文档切分与入库">文档切分与入库</a></li><li class="toc-l2"><a href="#问答接口">问答接口</a></li><li class="toc-l2"><a href="#效果测试">效果测试</a></li><li class="toc-l2"><a href="#局限性与下一步">局限性与下一步</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">🤖 AI 实战</span></p>
+      <h1>Spring AI 实战：构建本地 RAG 知识问答</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2026-05-15</span>
+        <span class="meta-read">☕ 预计阅读 16 分钟</span>
+        <span class="meta-tags"><code>#Spring AI</code> <code>#RAG</code> <code>#Qwen</code> <code>#Ollama</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="为什么突然要写这篇">为什么突然要写这篇</h2><p>上个月公司内部要做个&quot;规章制度问答&quot;的小工具：几十份 Word/PDF 制度文档，员工用自然语言提问，系统给出答案并标注出处。数据不能出内网，预算又很紧，方案基本被锁定成两条路：</p>
+<ol>
+<li>把文档拿去微调大模型——数据要脱敏、成本高、文档一更新就要重训，直接被否；</li>
+<li><strong>本地部署模型 + RAG</strong>——文档更新只动向量库，模型不用动，最合适。</li>
+</ol>
+<p>于是就有了这篇文章。技术选型是 Spring AI 1.0.0 + Spring Boot 3.5.0 + Ollama 上的 Qwen 模型 + Redis 向量检索，整套跑在开发机上，除了电费几乎零成本。</p>
+<blockquote>
+<p>我把这篇文章写得像自己的实验笔记而不是教程：有能跑的代码，也有踩过的坑。按照这个顺序搭，半天内应该能出第一个可问答的 demo。</p>
+</blockquote>
+<h2 id="rag-是什么-为什么需要它">RAG 是什么，为什么需要它</h2><p>RAG（Retrieval-Augmented Generation，检索增强生成）解决的是大模型两个老毛病：<strong>知识截止</strong>（训练数据有日期边界）和<strong>幻觉</strong>（不知道就编）。</p>
+<p>核心流程三步：</p>
+<pre><code class="language-text">离线：文档 → 切分 → 嵌入向量化 → 存入向量库
+在线：用户提问 → 向量化 → 向量库检索 topK 相似片段
+       → 片段拼进提示词作为上下文 → 大模型基于上下文生成回答
+</code></pre><blockquote>
+<p>一句话版本：<strong>不把知识塞进模型里，而是把知识塞进提示词里</strong>。回答时模型&quot;开卷考试&quot;，上下文里没有的它就老实说不知道。</p>
+</blockquote>
+<p>当时我们还对比过三种方案，结论如下：</p>
+<table>
+<thead>
+<tr>
+<th>方案</th>
+<th>数据时效</th>
+<th>成本</th>
+<th>维护复杂度</th>
+<th>幻觉控制</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>微调（Fine-tuning）</td>
+<td>差，更新要重训</td>
+<td>高（GPU/标注）</td>
+<td>高</td>
+<td>中</td>
+</tr>
+<tr>
+<td>RAG</td>
+<td>好，更新向量库即可</td>
+<td>低（本地模型）</td>
+<td>中</td>
+<td>好（有出处可查）</td>
+</tr>
+<tr>
+<td>全文塞提示词</td>
+<td>好</td>
+<td>低</td>
+<td>低</td>
+<td>差，塞不下</td>
+</tr>
+</tbody></table>
+<h2 id="为什么选-spring-ai-而不是自己拼">为什么选 Spring AI 而不是自己拼</h2><p>团队之前用 Python + LangChain 做过一个 demo，效果不错，但问题很现实：<strong>我们是 Java 团队，一个 Python 工具没人愿意长期维护</strong>。后来调研了 Spring AI：</p>
+<ul>
+<li>它是 Spring 官方的 AI 框架，2025 年 5 月发布 1.0.0 GA，Spring Boot 3.5.0 起可以直接用 starter 引入；</li>
+<li>概念和 LangChain 一一对应：<code>ChatModel</code>/<code>ChatClient</code>（对话）、<code>VectorStore</code>（向量库）、<code>Document</code> + <code>TextSplitter</code>（文档切分）、<code>EmbeddingModel</code>（嵌入）；</li>
+<li>供应商是配置化的：今天用 Ollama 跑本地 Qwen，明天想切 OpenAI 或通义，改几行配置就行，业务代码基本不动。</li>
+</ul>
+<blockquote>
+<p>我的观点：只要不是重度自定义流程（复杂 Agent 编排、自研向量检索），Spring AI 对 Java 项目是性价比最高的选择——不用造轮子，也不用养第二个技术栈。</p>
+</blockquote>
+<h2 id="环境准备-ollama-本地模型">环境准备：Ollama 本地模型</h2><p>Ollama 是个本地模型运行工具，支持 Windows/macOS/Linux，装完默认监听 <code>11434</code> 端口，提供 OpenAI 兼容的 HTTP API。拉模型：</p>
+<pre><code class="language-bash"><span class="hljs-comment"># 对话模型，约 4.7GB，中文效果好</span>
+ollama pull qwen2.5:7b
+
+<span class="hljs-comment"># 中文嵌入模型（生成向量用），约 1.2GB</span>
+ollama pull bge-m3
+</code></pre><p>验证是否就绪：</p>
+<pre><code class="language-bash">ollama list
+curl http://localhost:11434/api/tags
+</code></pre><blockquote>
+<p>注意：<code>qwen2.5:7b</code> 只支持对话（chat），不支持嵌入（embedding）接口。嵌入要单独用 <code>bge-m3</code> 或 <code>nomic-embed-text</code> 这类 embedding 模型，别混着用。</p>
+</blockquote>
+<p>模型选型参考：</p>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>用途</th>
+<th>向量维度</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>qwen2.5:7b</td>
+<td>生成回答</td>
+<td>-</td>
+<td>中文效果好，32K 上下文</td>
+</tr>
+<tr>
+<td>bge-m3</td>
+<td>文档/问题嵌入</td>
+<td>1024</td>
+<td>中文嵌入效果比 nomic 好</td>
+</tr>
+<tr>
+<td>nomic-embed-text</td>
+<td>文档/问题嵌入</td>
+<td>768</td>
+<td>英文场景常用</td>
+</tr>
+</tbody></table>
+<h2 id="项目骨架与依赖">项目骨架与依赖</h2><p>新建 Spring Boot 3.5.0 项目，引入 Spring AI 的 BOM 和两个 starter：</p>
+<pre><code class="language-xml"><span class="hljs-tag">&lt;<span class="hljs-name">dependencyManagement</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">dependencies</span>&gt;</span>
+        <span class="hljs-tag">&lt;<span class="hljs-name">dependency</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">groupId</span>&gt;</span>org.springframework.ai<span class="hljs-tag">&lt;/<span class="hljs-name">groupId</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">artifactId</span>&gt;</span>spring-ai-bom<span class="hljs-tag">&lt;/<span class="hljs-name">artifactId</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">version</span>&gt;</span>1.0.0<span class="hljs-tag">&lt;/<span class="hljs-name">version</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">type</span>&gt;</span>pom<span class="hljs-tag">&lt;/<span class="hljs-name">type</span>&gt;</span>
+            <span class="hljs-tag">&lt;<span class="hljs-name">scope</span>&gt;</span>import<span class="hljs-tag">&lt;/<span class="hljs-name">scope</span>&gt;</span>
+        <span class="hljs-tag">&lt;/<span class="hljs-name">dependency</span>&gt;</span>
+    <span class="hljs-tag">&lt;/<span class="hljs-name">dependencies</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">dependencyManagement</span>&gt;</span>
+</code></pre><pre><code class="language-xml"><span class="hljs-tag">&lt;<span class="hljs-name">dependency</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">groupId</span>&gt;</span>org.springframework.ai<span class="hljs-tag">&lt;/<span class="hljs-name">groupId</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">artifactId</span>&gt;</span>spring-ai-starter-model-ollama<span class="hljs-tag">&lt;/<span class="hljs-name">artifactId</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">dependency</span>&gt;</span>
+<span class="hljs-tag">&lt;<span class="hljs-name">dependency</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">groupId</span>&gt;</span>org.springframework.ai<span class="hljs-tag">&lt;/<span class="hljs-name">groupId</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">artifactId</span>&gt;</span>spring-ai-starter-vector-store-redis<span class="hljs-tag">&lt;/<span class="hljs-name">artifactId</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">dependency</span>&gt;</span>
+<span class="hljs-tag">&lt;<span class="hljs-name">dependency</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">groupId</span>&gt;</span>org.springframework.boot<span class="hljs-tag">&lt;/<span class="hljs-name">groupId</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">artifactId</span>&gt;</span>spring-boot-starter-web<span class="hljs-tag">&lt;/<span class="hljs-name">artifactId</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">dependency</span>&gt;</span>
+</code></pre><p><code>spring-ai-starter-model-ollama</code> 会同时带来 ChatModel 和 EmbeddingModel 的自动配置；<code>spring-ai-starter-vector-store-redis</code> 提供 Redis 向量存储（基于 RediSearch）。</p>
+<blockquote>
+<p>版本提醒：Spring AI 1.0.0 要求 Spring Boot 3.5.x。网上很多教程还是 0.8/1.0.0-M 系列的快照版本，API 变化很大，照着老教程写大概率编译不过。</p>
+</blockquote>
+<h2 id="配置-application-yml">配置 application.yml</h2><pre><code class="language-yaml"><span class="hljs-attr">spring:</span>
+  <span class="hljs-attr">ai:</span>
+    <span class="hljs-attr">ollama:</span>
+      <span class="hljs-attr">base-url:</span> <span class="hljs-string">http://localhost:11434</span>
+      <span class="hljs-attr">chat:</span>
+        <span class="hljs-attr">options:</span>
+          <span class="hljs-attr">model:</span> <span class="hljs-string">qwen2.5:7b</span>
+          <span class="hljs-attr">temperature:</span> <span class="hljs-number">0.3</span>
+      <span class="hljs-attr">embedding:</span>
+        <span class="hljs-attr">options:</span>
+          <span class="hljs-attr">model:</span> <span class="hljs-string">bge-m3</span>
+    <span class="hljs-attr">vectorstore:</span>
+      <span class="hljs-attr">redis:</span>
+        <span class="hljs-attr">index:</span> <span class="hljs-string">rag_index</span>          <span class="hljs-comment"># 向量索引名</span>
+        <span class="hljs-attr">prefix: doc:</span>              <span class="hljs-comment"># key 前缀，方便和其他数据隔离</span>
+        <span class="hljs-attr">initialize-schema:</span> <span class="hljs-literal">true</span>   <span class="hljs-comment"># 首次启动自动建索引</span>
+  <span class="hljs-attr">data:</span>
+    <span class="hljs-attr">redis:</span>
+      <span class="hljs-attr">host:</span> <span class="hljs-string">localhost</span>
+      <span class="hljs-attr">port:</span> <span class="hljs-number">6379</span>
+</code></pre><p><strong>一个关键坑</strong>：Redis 必须用 <strong>Redis Stack</strong>（带 RediSearch 模块），普通 Redis 不支持向量检索。本地起一个：</p>
+<pre><code class="language-bash">docker run -d --name redis-stack -p 6379:6379 redis/redis-stack:latest
+</code></pre><p>如果只想快速验证流程、不想装 Redis，可以用 Spring AI 自带的 <code>SimpleVectorStore</code>（内存实现，重启丢数据，生产别用），把上面的 starter 换成：</p>
+<pre><code class="language-xml"><span class="hljs-tag">&lt;<span class="hljs-name">dependency</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">groupId</span>&gt;</span>org.springframework.ai<span class="hljs-tag">&lt;/<span class="hljs-name">groupId</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">artifactId</span>&gt;</span>spring-ai-vector-store<span class="hljs-tag">&lt;/<span class="hljs-name">artifactId</span>&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">dependency</span>&gt;</span>
+</code></pre><h2 id="文档切分与入库">文档切分与入库</h2><p>RAG 里最容易被忽视的就是切分：<strong>切太小，语义碎片化；切太大，检索命中率低还浪费 token</strong>。我用 <code>TokenTextSplitter</code>，按 token 数切，带 20% 左右的重叠，避免关键句被从中间截断。</p>
+<pre><code class="language-java"><span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">DocumentInitializer</span> {
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">final</span> <span class="hljs-type">Logger</span> <span class="hljs-variable">log</span> <span class="hljs-operator">=</span> LoggerFactory.getLogger(DocumentInitializer.class);
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> VectorStore vectorStore;
+
+    <span class="hljs-comment">// 参数：chunkSize=400（每片约 400 token）</span>
+    <span class="hljs-comment">//       minChunkSize=100（小于这个长度不单独成片）</span>
+    <span class="hljs-comment">//       chunkOverlap=80（相邻片重叠 80 token）</span>
+    <span class="hljs-comment">//       keepSeparator=true（保留标题/分隔符，利于溯源）</span>
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> <span class="hljs-type">TokenTextSplitter</span> <span class="hljs-variable">splitter</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">TokenTextSplitter</span>(<span class="hljs-number">400</span>, <span class="hljs-number">100</span>, <span class="hljs-number">80</span>, <span class="hljs-literal">true</span>);
+
+    <span class="hljs-type">public</span> <span class="hljs-title function_">DocumentInitializer</span><span class="hljs-params">(VectorStore vectorStore)</span> {
+        <span class="hljs-built_in">this</span>.vectorStore = vectorStore;
+    }
+
+    <span class="hljs-comment">/**
+     * 演示用：启动就绪后把 classpath 下 markdown 文档切片入库。
+     * 生产环境建议做成独立 Job 或触发式接口，先按 metadata 清理旧切片再写入，避免重复入库。
+     */</span>
+    <span class="hljs-meta">@EventListener(ApplicationReadyEvent.class)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">ingest</span><span class="hljs-params">()</span> {
+        <span class="hljs-type">List</span>&lt;Document&gt; <span class="hljs-variable">docs</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">TextReader</span>(<span class="hljs-string">&quot;classpath:docs/员工手册.md&quot;</span>).read();
+
+        <span class="hljs-comment">// 给每个切好的片段打上来源标记，回答时能给出处</span>
+        <span class="hljs-type">List</span>&lt;Document&gt; <span class="hljs-variable">chunks</span> <span class="hljs-operator">=</span> splitter.apply(docs);
+        chunks.forEach(d -&gt; {
+            <span class="hljs-type">Map</span>&lt;String, Object&gt; <span class="hljs-variable">meta</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">HashMap</span>&lt;&gt;(d.getMetadata());
+            meta.put(<span class="hljs-string">&quot;source&quot;</span>, <span class="hljs-string">&quot;员工手册.md&quot;</span>);
+            d.getMetadata().putAll(meta);
+        });
+
+        vectorStore.add(chunks);
+        log.info(<span class="hljs-string">&quot;文档切分完成，共 {} 个切片，已写入向量库&quot;</span>, chunks.size());
+    }
+}
+</code></pre><p>切分参数直观对照：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>值</th>
+<th>影响</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>chunkSize</td>
+<td>400</td>
+<td>越大上下文越完整，但检索粒度越粗</td>
+</tr>
+<tr>
+<td>minChunkSize</td>
+<td>100</td>
+<td>过滤太短的碎片</td>
+</tr>
+<tr>
+<td>chunkOverlap</td>
+<td>80</td>
+<td>重叠越多越不容易断句，但冗余也越多</td>
+</tr>
+<tr>
+<td>keepSeparator</td>
+<td>true</td>
+<td>保留标题行，方便定位章节</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>踩坑记录：最初我用 1000 token 的 chunk，问&quot;年假多少天&quot;这种分布在两节之间的问题经常漏；换成 400 + 80 重叠后命中率明显上升。<strong>切分策略是 RAG 效果的分水岭，值得单独调优。</strong></p>
+</blockquote>
+<h2 id="问答接口">问答接口</h2><p>问答侧的核心是一个 <code>ChatClient</code>（Spring AI 1.0 的主 API，替代老版本的 <code>ChatModel</code> 直调），流程是：<strong>检索 → 拼上下文 → 生成</strong>。</p>
+<pre><code class="language-java"><span class="hljs-meta">@RestController</span>
+<span class="hljs-meta">@RequestMapping(&quot;/api/rag&quot;)</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">RagController</span> {
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> ChatClient chatClient;
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> VectorStore vectorStore;
+
+    <span class="hljs-type">public</span> <span class="hljs-title function_">RagController</span><span class="hljs-params">(ChatClient.Builder builder, VectorStore vectorStore)</span> {
+        <span class="hljs-built_in">this</span>.chatClient = builder.build();
+        <span class="hljs-built_in">this</span>.vectorStore = vectorStore;
+    }
+
+    <span class="hljs-meta">@GetMapping(&quot;/ask&quot;)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">String</span> <span class="hljs-title function_">ask</span><span class="hljs-params">(<span class="hljs-meta">@RequestParam</span> String question)</span> {
+        <span class="hljs-comment">// 1. 检索：把问题向量化，在向量库找最相似的 4 个片段</span>
+        <span class="hljs-type">List</span>&lt;Document&gt; <span class="hljs-variable">docs</span> <span class="hljs-operator">=</span> vectorStore.similaritySearch(
+                SearchRequest.builder().query(question).topK(<span class="hljs-number">4</span>).build());
+
+        <span class="hljs-comment">// 带出处拼接，方便模型引用</span>
+        <span class="hljs-type">String</span> <span class="hljs-variable">context</span> <span class="hljs-operator">=</span> docs.stream()
+                .map(d -&gt; <span class="hljs-string">&quot;【来源：&quot;</span> + d.getMetadata().getOrDefault(<span class="hljs-string">&quot;source&quot;</span>, <span class="hljs-string">&quot;unknown&quot;</span>) + <span class="hljs-string">&quot;】\n&quot;</span> + d.getContent())
+                .collect(Collectors.joining(<span class="hljs-string">&quot;\n\n---\n\n&quot;</span>));
+
+        <span class="hljs-comment">// 2. 生成：系统提示词约束行为 + 用户消息里带上下文和问题</span>
+        <span class="hljs-keyword">return</span> chatClient.prompt()
+                .system(<span class="hljs-string">&quot;你是一个严谨的文档问答助手。&quot;</span> +
+                        <span class="hljs-string">&quot;只能依据给定的上下文回答，禁止编造。&quot;</span> +
+                        <span class="hljs-string">&quot;上下文里没有答案时，明确回复&#x27;根据现有文档无法回答该问题&#x27;。&quot;</span> +
+                        <span class="hljs-string">&quot;回答末尾列出引用的文档来源。&quot;</span>)
+                .user(u -&gt; u.text(<span class="hljs-string">&quot;上下文：\n{context}\n\n问题：{question}&quot;</span>)
+                        .param(<span class="hljs-string">&quot;context&quot;</span>, context)
+                        .param(<span class="hljs-string">&quot;question&quot;</span>, question))
+                .call()
+                .content();
+    }
+}
+</code></pre><p>两个容易忽略的点：</p>
+<ul>
+<li><code>topK</code> 不是越大越好：4~5 个片段就够填满小模型的上下文了，多了反而稀释注意力、还可能把不相关的内容带进来；</li>
+<li>想流式输出（打字的视觉效果），把 <code>.call().content()</code> 换成就 <code>.stream().content()</code>，前端可以 SSEReactive 接。</li>
+</ul>
+<h2 id="效果测试">效果测试</h2><p>随便找几个问题跑了一下，记录如下：</p>
+<pre><code class="language-plaintext">问：年假有几天，怎么折算？
+答：根据《员工手册》第四章休假制度：工作满<span class="hljs-number"> 1 </span>年不满<span class="hljs-number"> 10 </span>年的，年休假<span class="hljs-number"> 5 </span>天；
+    满<span class="hljs-number"> 10 </span>年不满<span class="hljs-number"> 20 </span>年的，年休假<span class="hljs-number"> 10 </span>天。已休天数按当年实际在岗时间折算。
+    （来源：员工手册.md）
+</code></pre><table>
+<thead>
+<tr>
+<th>问题类型</th>
+<th>示例</th>
+<th>效果</th>
+<th>备注</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>原文直接有</td>
+<td>年假几天</td>
+<td>准确，带出处</td>
+<td>最理想的情况</td>
+</tr>
+<tr>
+<td>跨章节综合</td>
+<td>离职时年假怎么结算</td>
+<td>一般</td>
+<td>chunk 切分后信息分散，偶尔漏条款</td>
+</tr>
+<tr>
+<td>文档没有</td>
+<td>有没有期权政策</td>
+<td>正确拒绝</td>
+<td>靠系统提示词约束</td>
+</tr>
+<tr>
+<td>口语化</td>
+<td>请假扣钱不</td>
+<td>一般</td>
+<td>bge-m3 对口语/缩写理解有限</td>
+</tr>
+</tbody></table>
+<p>整体可用，但和&quot;爽文效果&quot;还差得远，尤其跨章节综合类问题经常答不全。</p>
+<h2 id="局限性与下一步">局限性与下一步</h2><p>老实说局限不少，逐个记下来：</p>
+<ol>
+<li><strong>切分粒度</strong>：400 token 对跨章节问题容易漏，本质是&quot;检索粒度 vs 上下文完整度&quot;的平衡，没有银弹；</li>
+<li><strong>上下文截断</strong>：Qwen 7b 上下文 32K，但多个片段拼起来很容易超——尤其是每条带出处和原文时。控制手段是 <code>topK</code> 调小、chunk 调小、片段按相似度排序后只取前几条；</li>
+<li><strong>中文嵌入质量</strong>：<code>bge-m3</code> 对业务黑话、缩写效果一般。后续可以加<strong>关键词召回兜底</strong>（BM25 全文检索 + 向量检索混合，再融合打分）；</li>
+<li><strong>重复入库</strong>：<code>ApplicationReadyEvent</code> 每次启动都跑一遍，同一份文档会重复进库。生产要按 metadata（文档名/版本号）先删旧再写，或者干脆用独立入口手动触发；</li>
+<li><strong>单轮对话</strong>：目前是无记忆的，追问&quot;那满 20 年呢&quot;会丢上下文，需要引入会话记忆。</li>
+</ol>
+<p>下一步计划：加一个 bge-reranker 重排（先粗召回 20 条再精排 5 条）、支持 PDF/Word 解析、把答案里的来源变成可点击链接。等做完再写一篇实战续集。</p>
+<blockquote>
+<p>总结：这套组合（Spring AI + Ollama + Redis）在没有预算、数据不出内网的场景下足够落地。别指望它一次到位，RAG 的效果是<strong>切分、检索、提示词三者反复调优</strong>调出来的，不是搭完就完事。</p>
+</blockquote>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/java-agent.html"><span>← 上一篇</span><b>从零搭建 Java 数据查询 Agent：告别手写 SQL</b></a>
+    <a class="pn-btn next" href="/post/oom-debug.html"><span>下一篇 →</span><b>JVM 内存泄漏排查实录：一次 Full GC 频发的救火经历</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

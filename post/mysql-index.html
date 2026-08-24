@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySQL 索引优化实战：从全表扫描到索引覆盖 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#一个让人失眠的下午">一个让人失眠的下午</a></li><li class="toc-l2"><a href="#索引为什么能快-b-tree">索引为什么能快：B+Tree</a></li><li class="toc-l2"><a href="#联合索引与最左前缀">联合索引与最左前缀</a></li><li class="toc-l2"><a href="#回表与覆盖索引">回表与覆盖索引</a></li><li class="toc-l2"><a href="#读懂-explain">读懂 EXPLAIN</a></li><li class="toc-l2"><a href="#五个常见的索引失效场景">五个常见的索引失效场景</a></li><li class="toc-l2"><a href="#实战复盘-1-2s-30ms">实战复盘：1.2s → 30ms</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">🗄️ 数据库</span></p>
+      <h1>MySQL 索引优化实战：从全表扫描到索引覆盖</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2025-05-05</span>
+        <span class="meta-read">☕ 预计阅读 10 分钟</span>
+        <span class="meta-tags"><code>#MySQL</code> <code>#索引</code> <code>#EXPLAIN</code> <code>#性能</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="一个让人失眠的下午">一个让人失眠的下午</h2><p>周一下午四点，值班同事在群里 @我：&quot;设备数据查询页面转圈超过两秒，平台侧的同事都在催。&quot;</p>
+<p>我拉了一下慢查询日志，果然有条 SQL 稳稳地挂在最前面：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record
+<span class="hljs-keyword">WHERE</span> device_id <span class="hljs-operator">=</span> <span class="hljs-number">10086</span>
+  <span class="hljs-keyword">AND</span> report_time <span class="hljs-operator">&gt;=</span> <span class="hljs-string">&#x27;2025-03-01&#x27;</span>
+  <span class="hljs-keyword">AND</span> data_type <span class="hljs-operator">=</span> <span class="hljs-number">1</span>
+<span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> report_time <span class="hljs-keyword">DESC</span>
+LIMIT <span class="hljs-number">20</span>;
+</code></pre><p>EXPLAIN 一看，type 是 ALL，rows 一千多万，Extra 里还挂着 Using filesort——全表扫描 + 文件排序，1.2 秒一点不冤。</p>
+<p>这篇文章就从这个案例展开，把索引相关的知识点串一遍。<strong>结论先行</strong>：改造后这条 SQL 稳定在 30ms 左右，办法就是三个字——加索引，加对索引。</p>
+<h2 id="索引为什么能快-b-tree">索引为什么能快：B+Tree</h2><p>先问一个问题：为什么 MySQL 的默认存储引擎 InnoDB 用 B+Tree 而不是二叉树、B-Tree 或者哈希表？</p>
+<blockquote>
+<p>磁盘 IO 是按页（默认 16KB）读取的，树的高度决定了查询要走几次 IO。B+Tree 的&quot;矮胖&quot;结构让三层的树就能存下千万级的数据。</p>
+</blockquote>
+<p>三个候选结构对比一下：</p>
+<table>
+<thead>
+<tr>
+<th>结构</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>二叉树</td>
+<td>数据量大时树太高，极端情况退化成链表更糟</td>
+</tr>
+<tr>
+<td>B-Tree</td>
+<td>每个节点既存 key 又存 data，节点能容纳的 key 变少，树变高</td>
+</tr>
+<tr>
+<td><strong>B+Tree</strong></td>
+<td>非叶子节点只存 key，一个节点能容纳更多 key，树更矮；叶子节点用链表串联，天然支持范围查询</td>
+</tr>
+</tbody></table>
+<p>InnoDB 中索引和数据是&quot;聚簇&quot;的：主键索引（聚簇索引）的叶子节点直接存整行数据；二级索引（普通索引）的叶子节点存<strong>主键值</strong>。这一点是理解&quot;回表&quot;的关键。</p>
+<h2 id="联合索引与最左前缀">联合索引与最左前缀</h2><p>回到设备历史数据表。设备最常见的数据查询姿势是「按设备 + 时间 + 数据类型」，于是我们建了联合索引：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">ALTER TABLE</span> t_device_record <span class="hljs-keyword">ADD</span> INDEX idx_device_time_type (device_id, report_time, data_type);
+</code></pre><p>联合索引的本质是：先按第一个字段排序，第一个字段相同的再按第二个字段排序，以此类推。所以它到底能命中哪部分，遵守<strong>最左前缀原则</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>查询条件</th>
+<th>能否走 idx_device_time_type</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>device_id = 10086</code></td>
+<td>✅ 用到 device_id</td>
+</tr>
+<tr>
+<td><code>device_id = 10086 AND report_time &gt; &#39;2025-03-01&#39;</code></td>
+<td>✅ 用到 device_id + report_time</td>
+</tr>
+<tr>
+<td><code>device_id = 10086 AND data_type = 1</code></td>
+<td>⚠️ 只用 device_id（跳过了 report_time，data_type 用不上）</td>
+</tr>
+<tr>
+<td><code>report_time &gt; &#39;2025-03-01&#39;</code></td>
+<td>❌ 没带最左边的 device_id，整个索引失效</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>面试高频题：联合索引 (a, b, c)，<code>WHERE a = 1 AND c = 3</code> 能用几个字段？答案是只有 a。因为 b 被跳过后，c 无法确定位置，只能靠回表逐行过滤。</p>
+</blockquote>
+<h2 id="回表与覆盖索引">回表与覆盖索引</h2><p>二级索引的叶子节点存的是主键值，所以 <code>SELECT *</code> 走二级索引查到记录时，还需要再根据主键去聚簇索引拿整行数据——这就是<strong>回表</strong>，一次回表就是一次随机 IO。</p>
+<p>怎么避免？<strong>覆盖索引</strong>：让查询用到的所有列都在索引里。</p>
+<p>我们最终的优化方案是&quot;拆列&quot;，把真正需要展示的字段写进 SELECT：</p>
+<pre><code class="language-sql"><span class="hljs-comment">-- 优化后</span>
+<span class="hljs-keyword">SELECT</span> device_id, report_time, data_type, device_no
+<span class="hljs-keyword">FROM</span> t_device_record
+<span class="hljs-keyword">WHERE</span> device_id <span class="hljs-operator">=</span> <span class="hljs-number">10086</span>
+  <span class="hljs-keyword">AND</span> report_time <span class="hljs-operator">&gt;=</span> <span class="hljs-string">&#x27;2025-03-01&#x27;</span>
+  <span class="hljs-keyword">AND</span> data_type <span class="hljs-operator">=</span> <span class="hljs-number">1</span>
+<span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> report_time <span class="hljs-keyword">DESC</span>
+LIMIT <span class="hljs-number">20</span>;
+</code></pre><p>配合 <code>idx_device_time_type</code>，Extra 变成了 <code>Using index</code>——数据全在索引里，连回表都省了。</p>
+<blockquote>
+<p>注意：覆盖索引不是无脑把列都塞进索引。索引越多，写入时的维护成本越大、占用空间也越涨，一般只在热点查询上做。</p>
+</blockquote>
+<h2 id="读懂-explain">读懂 EXPLAIN</h2><p>调 SQL 之前先把 EXPLAIN 读利索。我常用这几列：</p>
+<table>
+<thead>
+<tr>
+<th>列</th>
+<th>含义</th>
+<th>怎么判断好坏</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>type</code></td>
+<td>访问类型</td>
+<td>好的方向：system &gt; const &gt; eq_ref &gt; ref &gt; range &gt; index &gt; ALL，ALL 最差</td>
+</tr>
+<tr>
+<td><code>key</code></td>
+<td>实际用到的索引</td>
+<td>NULL 代表没走索引，大概率有问题</td>
+</tr>
+<tr>
+<td><code>rows</code></td>
+<td>预估扫描行数</td>
+<td>越小越好（注意只是估计值，不一定精确）</td>
+</tr>
+<tr>
+<td><code>Extra</code></td>
+<td>附加信息</td>
+<td>出现 <code>Using filesort</code> / <code>Using temporary</code> 是强烈信号</td>
+</tr>
+<tr>
+<td><code>filtered</code></td>
+<td>过滤比例</td>
+<td>和 rows 一起估算实际返回的行数</td>
+</tr>
+</tbody></table>
+<p>优化前后对比：</p>
+<pre><code class="language-sql"><span class="hljs-comment">-- 优化前</span>
+mysql<span class="hljs-operator">&gt;</span> EXPLAIN <span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record <span class="hljs-keyword">WHERE</span> device_id <span class="hljs-operator">=</span> <span class="hljs-number">10086</span> <span class="hljs-keyword">AND</span> report_time <span class="hljs-operator">&gt;=</span> <span class="hljs-string">&#x27;2025-03-01&#x27;</span> <span class="hljs-keyword">AND</span> data_type <span class="hljs-operator">=</span> <span class="hljs-number">1</span> <span class="hljs-keyword">ORDER</span> <span class="hljs-keyword">BY</span> report_time <span class="hljs-keyword">DESC</span> LIMIT <span class="hljs-number">20</span>\G
+...
+type: <span class="hljs-keyword">ALL</span>
+<span class="hljs-keyword">rows</span>: <span class="hljs-number">10372450</span>
+Extra: <span class="hljs-keyword">Using</span> <span class="hljs-keyword">where</span>; <span class="hljs-keyword">Using</span> filesort
+
+<span class="hljs-comment">-- 优化后（覆盖索引版本）</span>
+type: <span class="hljs-keyword">ref</span>
+key: idx_device_time_type
+<span class="hljs-keyword">rows</span>: <span class="hljs-number">482</span>
+Extra: <span class="hljs-keyword">Using</span> index
+</code></pre><p><code>Using filesort</code> 有多疼？意味着 MySQL 要把结果集搬进 sort buffer 排一遍，数据量大时还会落到临时文件。而联合索引本身就是按 (device_id, report_time) 排好序的，<code>ORDER BY report_time DESC</code> 直接顺着索引倒着读就行，排序开销直接归零。</p>
+<h2 id="五个常见的索引失效场景">五个常见的索引失效场景</h2><p>光会加索引不够，还得会躲坑。下面五个场景我都踩过：</p>
+<p><strong>1. 隐式类型转换</strong></p>
+<pre><code class="language-sql"><span class="hljs-comment">-- device_no 是 varchar 类型</span>
+<span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record <span class="hljs-keyword">WHERE</span> device_no <span class="hljs-operator">=</span> <span class="hljs-number">20250401001</span>;   <span class="hljs-comment">-- ❌ 失效</span>
+<span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record <span class="hljs-keyword">WHERE</span> device_no <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;20250401001&#x27;</span>; <span class="hljs-comment">-- ✅ 正常</span>
+</code></pre><p>MySQL 会把 varchar 列转成数字再比较，相当于对列做了函数运算，索引直接废掉。<strong>参数类型必须和列类型一致</strong>。</p>
+<p><strong>2. 对索引列使用函数</strong></p>
+<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record <span class="hljs-keyword">WHERE</span> <span class="hljs-type">DATE</span>(report_time) <span class="hljs-operator">=</span> <span class="hljs-string">&#x27;2025-04-01&#x27;</span>; <span class="hljs-comment">-- ❌ 失效</span>
+<span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record <span class="hljs-keyword">WHERE</span> report_time <span class="hljs-operator">&gt;=</span> <span class="hljs-string">&#x27;2025-04-01&#x27;</span>
+                                <span class="hljs-keyword">AND</span> report_time <span class="hljs-operator">&lt;</span>  <span class="hljs-string">&#x27;2025-04-02&#x27;</span>;      <span class="hljs-comment">-- ✅ 范围查询</span>
+</code></pre><p><strong>3. 前缀模糊匹配</strong></p>
+<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device <span class="hljs-keyword">WHERE</span> device_name <span class="hljs-keyword">LIKE</span> <span class="hljs-string">&#x27;%一号%&#x27;</span>; <span class="hljs-comment">-- ❌ 开头通配符，用不上索引</span>
+<span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device <span class="hljs-keyword">WHERE</span> device_name <span class="hljs-keyword">LIKE</span> <span class="hljs-string">&#x27;一号%&#x27;</span>;  <span class="hljs-comment">-- ✅ 后缀通配，可走 range</span>
+</code></pre><p><strong>4. OR 条件中有一边没索引</strong></p>
+<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record <span class="hljs-keyword">WHERE</span> device_id <span class="hljs-operator">=</span> <span class="hljs-number">1</span> <span class="hljs-keyword">OR</span> data_type <span class="hljs-operator">=</span> <span class="hljs-number">0</span>; <span class="hljs-comment">-- ❌ data_type 无索引，整条失效</span>
+<span class="hljs-comment">-- 改成 UNION ALL，两边各走各的索引</span>
+<span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record <span class="hljs-keyword">WHERE</span> device_id <span class="hljs-operator">=</span> <span class="hljs-number">1</span>
+<span class="hljs-keyword">UNION</span> <span class="hljs-keyword">ALL</span>
+<span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record <span class="hljs-keyword">WHERE</span> data_type <span class="hljs-operator">=</span> <span class="hljs-number">0</span>;
+</code></pre><p><strong>5. 否定条件</strong></p>
+<pre><code class="language-sql"><span class="hljs-keyword">SELECT</span> <span class="hljs-operator">*</span> <span class="hljs-keyword">FROM</span> t_device_record <span class="hljs-keyword">WHERE</span> data_type <span class="hljs-operator">!=</span> <span class="hljs-number">1</span>; <span class="hljs-comment">-- 多数情况下用不上索引（覆盖索引除外）</span>
+</code></pre><blockquote>
+<p>顺带一提：优化器不是傻子，当 <code>rows</code> 占比太高、回表代价高于全表扫描时，它会主动放弃索引。所以索引有没有生效，永远以 EXPLAIN 为准，别靠猜。</p>
+</blockquote>
+<h2 id="实战复盘-1-2s-30ms">实战复盘：1.2s → 30ms</h2><p>最后把整个改造串一遍：</p>
+<p><strong>Step 1</strong>：确认业务需求。这个接口固定按 device_id 进，时间区间 + 数据类型过滤，按时间倒序取前 20 条。</p>
+<p><strong>Step 2</strong>：建联合索引，顺序按「等值条件在前，范围条件在后」排。</p>
+<pre><code class="language-sql"><span class="hljs-keyword">ALTER TABLE</span> t_device_record <span class="hljs-keyword">ADD</span> INDEX idx_device_time_type (device_id, report_time, data_type);
+</code></pre><p><strong>Step 3</strong>：把 <code>SELECT *</code> 改成只选需要的列，让查询列全部落在索引里，Extra 达到 <code>Using index</code>。</p>
+<p><strong>Step 4</strong>：上线前用线上库的 EXPLAIN 复验，rows 从一千多万掉到几百。</p>
+<p><strong>Step 5</strong>：上线后盯慢查询日志，确认这条 SQL 从列表里消失。</p>
+<p>改造前后对比：</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>优化前</th>
+<th>优化后</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>扫描行数</td>
+<td>10,372,450</td>
+<td>482</td>
+</tr>
+<tr>
+<td>访问类型</td>
+<td>ALL</td>
+<td>ref</td>
+</tr>
+<tr>
+<td>排序方式</td>
+<td>filesort</td>
+<td>索引有序</td>
+</tr>
+<tr>
+<td>耗时</td>
+<td>~1.2s</td>
+<td>~30ms</td>
+</tr>
+</tbody></table>
+<p>几个经验，写在这里供参考：</p>
+<ol>
+<li><strong>等值条件放联合索引左边，范围条件放右边</strong>——最左前缀原则的直接应用。</li>
+<li><strong>设备上报场景里单表索引别超过 5 个左右</strong>，写多读少的表更要克制。</li>
+<li><strong>监控三件套</strong>：慢查询日志、EXPLAIN、<code>SHOW INDEX</code> 看区分度。</li>
+<li>索引不是银弹，<code>SELECT *</code> + 无脑加索引的组合拳解决不了所有问题，先把 SQL 写对，再谈优化。</li>
+</ol>
+<p>这篇文章是「MySQL 优化」系列的第一篇，下一篇聊聊锁：行锁、间隙锁，还有我线上遇到的那个 UPDATE 死锁。</p>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/mysql-lock.html"><span>← 上一篇</span><b>MySQL 锁机制：从行锁到死锁实战</b></a>
+    <a class="pn-btn next" href="/post/jvm-memory.html"><span>下一篇 →</span><b>JVM 内存模型与垃圾回收</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

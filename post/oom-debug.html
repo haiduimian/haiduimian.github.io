@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JVM 内存泄漏排查实录：一次 Full GC 频发的救火经历 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#现象-full-gc-每-5-分钟一次">现象：Full GC 每 5 分钟一次</a></li><li class="toc-l2"><a href="#排查工具链-从轻到重-逐层收敛">排查工具链：从轻到重，逐层收敛</a></li><li class="toc-l3"><a href="#第一步-jstat-看-gc-曲线">第一步：jstat 看 GC 曲线</a></li><li class="toc-l3"><a href="#第二步-jmap-heap-确认老年代水位">第二步：jmap -heap 确认老年代水位</a></li><li class="toc-l3"><a href="#第三步-jmap-histo-找可疑对象">第三步：jmap -histo 找可疑对象</a></li><li class="toc-l3"><a href="#第四步-打开堆转储">第四步：打开堆转储</a></li><li class="toc-l2"><a href="#mat-分析-dominator-tree-揪出-static-容器">MAT 分析：Dominator Tree 揪出 static 容器</a></li><li class="toc-l3"><a href="#第一步-先看-histogram">第一步：先看 Histogram</a></li><li class="toc-l3"><a href="#第二步-path-to-gc-roots">第二步：Path to GC Roots</a></li><li class="toc-l3"><a href="#第三步-dominator-tree-定量确认">第三步：Dominator Tree 定量确认</a></li><li class="toc-l2"><a href="#泄漏代码示例与修复">泄漏代码示例与修复</a></li><li class="toc-l3"><a href="#元凶代码">元凶代码</a></li><li class="toc-l3"><a href="#修复方案">修复方案</a></li><li class="toc-l3"><a href="#为什么这样改">为什么这样改</a></li><li class="toc-l2"><a href="#预防-三道防线">预防：三道防线</a></li><li class="toc-l3"><a href="#防线一-代码评审与静态检查">防线一：代码评审与静态检查</a></li><li class="toc-l3"><a href="#防线二-监控告警">防线二：监控告警</a></li><li class="toc-l3"><a href="#防线三-上线前小堆压测">防线三：上线前小堆压测</a></li><li class="toc-l2"><a href="#总结">总结</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">🐞 踩坑实战</span></p>
+      <h1>JVM 内存泄漏排查实录：一次 Full GC 频发的救火经历</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2026-04-25</span>
+        <span class="meta-read">☕ 预计阅读 13 分钟</span>
+        <span class="meta-tags"><code>#JVM</code> <code>#内存泄漏</code> <code>#MAT</code> <code>#调优</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="现象-full-gc-每-5-分钟一次">现象：Full GC 每 5 分钟一次</h2><p>四月下旬的一个周六，运维发来一张监控截图：<strong>设备数据接入服务老年代占用率从下午的 40% 一路爬到 92%，Full GC 每 5 分钟触发一次，每次 STW 2~3 秒</strong>——设备上报数据出现接收延时和丢失，监控大屏的数据开始滞后，现场反馈曲线对不上。</p>
+<p>这服务是个老项目，堆配置 4G（新生代 1G / 老年代 3G），平时 GC 很健康：YGC 每秒几次，Full GC 一周都难得有一次。从「健康」到「每周恶化」的曲线，基本可以断定：<strong>有内存泄漏</strong>，而且泄漏速度在加快。</p>
+<h2 id="排查工具链-从轻到重-逐层收敛">排查工具链：从轻到重，逐层收敛</h2><h3 id="第一步-jstat-看-gc-曲线">第一步：jstat 看 GC 曲线</h3><p>先 <code>top</code> 确认进程 PID，然后 jstat 盯 30 分钟：</p>
+<pre><code class="language-bash">jstat -gcutil 27481 5000
+</code></pre><p>输出（截取关键几行）：</p>
+<pre><code class="language-plaintext">  <span class="hljs-attribute">S0</span>     S1     E      O      M     CCS    YGC     YGCT    FGC    FGCT     GCT
+  <span class="hljs-attribute">0</span>.<span class="hljs-number">00</span>  <span class="hljs-number">88</span>.<span class="hljs-number">10</span>  <span class="hljs-number">71</span>.<span class="hljs-number">32</span>  <span class="hljs-number">82</span>.<span class="hljs-number">14</span>  <span class="hljs-number">96</span>.<span class="hljs-number">1</span>   ...    <span class="hljs-number">3921</span>   <span class="hljs-number">55</span>.<span class="hljs-number">204</span>     <span class="hljs-number">35</span>   <span class="hljs-number">39</span>.<span class="hljs-number">410</span>    <span class="hljs-number">94</span>.<span class="hljs-number">614</span>
+  <span class="hljs-attribute">0</span>.<span class="hljs-number">00</span>  <span class="hljs-number">92</span>.<span class="hljs-number">35</span>  <span class="hljs-number">78</span>.<span class="hljs-number">40</span>  <span class="hljs-number">85</span>.<span class="hljs-number">03</span>  <span class="hljs-number">96</span>.<span class="hljs-number">1</span>   ...    <span class="hljs-number">4123</span>   <span class="hljs-number">58</span>.<span class="hljs-number">204</span>     <span class="hljs-number">37</span>   <span class="hljs-number">41</span>.<span class="hljs-number">813</span>   <span class="hljs-number">100</span>.<span class="hljs-number">017</span>
+  <span class="hljs-attribute">0</span>.<span class="hljs-number">00</span>  <span class="hljs-number">89</span>.<span class="hljs-number">11</span>  <span class="hljs-number">83</span>.<span class="hljs-number">22</span>  <span class="hljs-number">88</span>.<span class="hljs-number">71</span>  <span class="hljs-number">96</span>.<span class="hljs-number">1</span>   ...    <span class="hljs-number">4330</span>   <span class="hljs-number">61</span>.<span class="hljs-number">103</span>     <span class="hljs-number">42</span>   <span class="hljs-number">47</span>.<span class="hljs-number">260</span>   <span class="hljs-number">108</span>.<span class="hljs-number">363</span>
+</code></pre><p>注意两列：<strong>O（老年代使用率）单调上涨，FGC（Full GC 次数）和 FGCT（Full GC 总耗时）在加速</strong>。30 分钟内 Full GC 从 35 次涨到 42 次——不是回收不掉，而是回收完又被很快填满。</p>
+<h3 id="第二步-jmap-heap-确认老年代水位">第二步：jmap -heap 确认老年代水位</h3><pre><code class="language-bash">jmap -heap 27481
+</code></pre><p>关键输出：</p>
+<pre><code class="language-plaintext">Heap Configuration:
+   MaxHeapSize = <span class="hljs-number">4294967296</span> <span class="hljs-punctuation">(</span><span class="hljs-number">4096</span>.<span class="hljs-number">0M</span>B<span class="hljs-punctuation">)</span>
+   ...
+Heap Usage:
+PS Old Generation
+   capacity = <span class="hljs-number">3221225472</span> <span class="hljs-punctuation">(</span><span class="hljs-number">3072</span>.<span class="hljs-number">0M</span>B<span class="hljs-punctuation">)</span>
+   used     = <span class="hljs-number">2838478920</span> <span class="hljs-punctuation">(</span><span class="hljs-number">2707</span>.<span class="hljs-number">2M</span>B<span class="hljs-punctuation">)</span>
+   free     = <span class="hljs-number">322746552</span> <span class="hljs-punctuation">(</span><span class="hljs-number">307</span>.<span class="hljs-number">8M</span>B<span class="hljs-punctuation">)</span>
+   <span class="hljs-number">88</span>.<span class="hljs-number">1</span>% used
+</code></pre><p>老年代已用 88%，还在涨。<strong>Full GC 后老年代只回落 5% 以内</strong>，基本实锤泄漏——如果是大对象临时聚集，Full GC 后应该大幅回落。</p>
+<h3 id="第三步-jmap-histo-找可疑对象">第三步：jmap -histo 找可疑对象</h3><p><code>jmap -histo</code> 会触发一次 STW（生产要谨慎），低峰期执行可以接受：</p>
+<pre><code class="language-bash">jmap -histo:live 27481 | <span class="hljs-built_in">head</span> -25
+</code></pre><p>输出（简化）：</p>
+<pre><code class="language-plaintext"> num     <span class="hljs-comment">#instances         #bytes  class name</span>
+   1:     <span class="hljs-number"> 13048217 </span>  <span class="hljs-number"> 1878943248 </span> com.xxx.iot.gateway.ingest.DeviceReportRecord
+   2:       <span class="hljs-number"> 415000 </span>    <span class="hljs-number"> 21580000 </span> [B
+   3:       <span class="hljs-number"> 300000 </span>    <span class="hljs-number"> 15450000 </span> java.lang.String
+   4:            <span class="hljs-number"> 1 </span>          <span class="hljs-number"> 48 </span> java.util.ArrayList
+</code></pre><p>一个我们自己的业务对象 <code>DeviceReportRecord</code> 有 <strong>1300 万个实例、占用 1.8G</strong>——占了大半个老年代。一个业务对象不该有这么多实例，它必然被某个「根」一直引用着。</p>
+<h3 id="第四步-打开堆转储">第四步：打开堆转储</h3><p>泄漏的对象找到了，但还要知道「谁持有它们」。用 <code>jmap -dump:live</code> 现场抓一份堆（生产选择低峰期）：</p>
+<pre><code class="language-bash">jmap -dump:live,format=b,file=/data/dump/devicegw-$(<span class="hljs-built_in">date</span> +%Y%m%d%H%M).hprof 27481
+</code></pre><blockquote>
+<p>生产上的标准姿势其实是：<strong>给 JVM 加上 OOM 自动 dump 参数，让它崩溃时自己留下现场</strong>。这次我们一边人工 dump，一边给线上补上下面这行，万一半夜再 OOM 也能抓到第二次现场：</p>
+<pre><code class="language-bash">java -Xms4g -Xmx4g \
+     -XX:+HeapDumpOnOutOfMemoryError \
+     -XX:HeapDumpPath=/data/dump \
+     -jar device-gateway.jar
+</code></pre></blockquote>
+<h2 id="mat-分析-dominator-tree-揪出-static-容器">MAT 分析：Dominator Tree 揪出 static 容器</h2><p>hprof 有 2.1G，用 MAT（Memory Analyzer）打开。MAT 默认分析对象的强引用路径，正好够用。</p>
+<h3 id="第一步-先看-histogram">第一步：先看 Histogram</h3><p><code>Histogram</code> 视图里点开 <code>DeviceReportRecord</code>，右键 → <strong>List objects → with outgoing references</strong>，能看到这些对象被谁引用。</p>
+<h3 id="第二步-path-to-gc-roots">第二步：Path to GC Roots</h3><p>再右键 → <strong>Merge Shortest Paths to GC Roots → exclude all phantom/weak/soft etc. references</strong>，结果一目了然：</p>
+<pre><code class="language-plaintext">com<span class="hljs-selector-class">.xxx</span><span class="hljs-selector-class">.iot</span><span class="hljs-selector-class">.gateway</span><span class="hljs-selector-class">.ingest</span><span class="hljs-selector-class">.DeviceReportCollector</span>
+  └─ static RECORDS  (java<span class="hljs-selector-class">.util</span>.ArrayList)  <span class="hljs-selector-attr">[1.9 GB retained]</span>
+     └─ &lt;Java Local&gt; → <span class="hljs-number">1300</span> 万个 DeviceReportRecord
+</code></pre><h3 id="第三步-dominator-tree-定量确认">第三步：Dominator Tree 定量确认</h3><p>切到 <strong>Dominator Tree</strong> 视图，顶部赫然一行：</p>
+<table>
+<thead>
+<tr>
+<th>Object</th>
+<th>Shallow Heap</th>
+<th>Retained Heap</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>java.util.ArrayList @ 0x7f3c8xxx</code>（DeviceReportCollector.RECORDS）</td>
+<td>48 B</td>
+<td>1,879,357,040 B（1.75 GB）</td>
+</tr>
+</tbody></table>
+<p>一个 shallow 只有 48 字节的 ArrayList，retained 1.75G——<strong>它支配了整棵引用子树</strong>。泄漏点锁定：<code>DeviceReportCollector</code> 的静态集合。</p>
+<blockquote>
+<p>排查泄漏的标准动作就三步：<code>jstat</code> 看趋势确认泄漏 → <code>jmap -histo</code> 找谁多 → MAT 看 GC Roots 找谁持有。后两步能精确到「字段级别」。</p>
+</blockquote>
+<h2 id="泄漏代码示例与修复">泄漏代码示例与修复</h2><h3 id="元凶代码">元凶代码</h3><p>泄漏点是设备上报记录的一个「顺手实现」。当时为了采集统计需求，把每一条上报记录先攒在内存里，每分钟用定时任务批量落库一次，<strong>落库成功后忘了清空容器</strong>：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">DeviceReportCollector</span> {
+
+    <span class="hljs-comment">/** 内存里攒着待落库的设备上报记录 —— static + ArrayList + 无界增长 */</span>
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">final</span> <span class="hljs-type">List</span>&lt;DeviceReportRecord&gt; <span class="hljs-variable">RECORDS</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ArrayList</span>&lt;&gt;();
+
+    <span class="hljs-comment">// 设备上报时调用，接入高峰期每秒几十万条</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> <span class="hljs-type">void</span> <span class="hljs-title function_">record</span><span class="hljs-params">(DeviceReportRecord record)</span> {
+        RECORDS.add(record);
+    }
+
+    <span class="hljs-meta">@Scheduled(fixedRate = 60_000)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">flush</span><span class="hljs-params">()</span> {
+        <span class="hljs-type">List</span>&lt;DeviceReportRecord&gt; <span class="hljs-variable">batch</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ArrayList</span>&lt;&gt;(RECORDS);
+        <span class="hljs-keyword">try</span> {
+            reportStore.persist(batch);
+            <span class="hljs-comment">// BUG：落库成功后没有 RECORDS.clear()</span>
+            <span class="hljs-comment">// 正常情况：每分钟清一次，容器基本是空的</span>
+            <span class="hljs-comment">// 异常情况：reportStore 一直抛异常，batch 永远发不出去，</span>
+            <span class="hljs-comment">//          但 record() 还在不断 add —— 于是无限增长</span>
+        } <span class="hljs-keyword">catch</span> (Exception e) {
+            log.error(<span class="hljs-string">&quot;设备上报记录落库失败，下轮重试&quot;</span>, e);
+        }
+    }
+}
+</code></pre><p>为什么漏掉？因为之前上线时 <code>reportStore.persist</code> 一直返回成功，测试环境流量小，容器每分钟都能清空，<strong>问题只在「落库持续失败 + 流量大」两个条件同时成立时爆发</strong>——线上正好赶上报障期，数据链路下游的时序存储服务挂了 40 分钟。</p>
+<h3 id="修复方案">修复方案</h3><pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">DeviceReportCollector</span> {
+
+    <span class="hljs-comment">// 1. 有界队列，从源头限制内存占用</span>
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">final</span> <span class="hljs-type">ArrayBlockingQueue</span>&lt;DeviceReportRecord&gt; <span class="hljs-variable">QUEUE</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ArrayBlockingQueue</span>&lt;&gt;(<span class="hljs-number">100_000</span>);
+
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> <span class="hljs-type">boolean</span> <span class="hljs-title function_">record</span><span class="hljs-params">(DeviceReportRecord record)</span> {
+        <span class="hljs-keyword">return</span> QUEUE.offer(record);   <span class="hljs-comment">// 满了直接丢弃并计数，绝不阻塞主流程</span>
+    }
+
+    <span class="hljs-meta">@Scheduled(fixedRate = 60_000)</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">flush</span><span class="hljs-params">()</span> {
+        <span class="hljs-type">List</span>&lt;DeviceReportRecord&gt; <span class="hljs-variable">batch</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ArrayList</span>&lt;&gt;(QUEUE.size());
+        QUEUE.drainTo(batch, <span class="hljs-number">100_000</span>);   <span class="hljs-comment">// 2. drain 原子取出并清空，不需要手动 clear</span>
+        <span class="hljs-keyword">if</span> (batch.isEmpty()) {
+            <span class="hljs-keyword">return</span>;
+        }
+        <span class="hljs-keyword">try</span> {
+            reportStore.persist(batch);
+        } <span class="hljs-keyword">catch</span> (Exception e) {
+            <span class="hljs-comment">// 3. 失败走 MQ 补偿，而不是留在 JVM 内存里</span>
+            mqTemplate.convertAndSend(<span class="hljs-string">&quot;device-report.retry&quot;</span>, batch);
+            log.error(<span class="hljs-string">&quot;落库失败，已转 MQ 补偿，数量={}&quot;</span>, batch.size(), e);
+        }
+    }
+}
+</code></pre><h3 id="为什么这样改">为什么这样改</h3><ul>
+<li><strong>去掉「static + 无界 ArrayList」的组合</strong>：static 意味着生命周期 = 类生命周期 = 进程生命周期，GC 永远回收不掉；无界意味着没有上限保护。</li>
+<li>改成<strong>有界队列 + drainTo</strong>：<code>drainTo</code> 是原子的「取出并清空」，天然不会重复消费也不会残留；</li>
+<li>失败数据<strong>转移出 JVM</strong>（MQ / 落库），让内存只做「瞬时缓冲」，不做「持久存储」。</li>
+</ul>
+<p>如果业务上就是要「带过期时间的本地缓存」，优先用 Caffeine 这类带容量和过期策略的组件，而不是手写 static Map/List。</p>
+<h2 id="预防-三道防线">预防：三道防线</h2><h3 id="防线一-代码评审与静态检查">防线一：代码评审与静态检查</h3><p>把「static 字段持有 Collection」写进团队规范，最好做成机器检查，比如 Checkstyle：</p>
+<pre><code class="language-xml"><span class="hljs-comment">&lt;!-- checkstyle: 禁止 static 字段持有集合类型 --&gt;</span>
+<span class="hljs-tag">&lt;<span class="hljs-name">module</span> <span class="hljs-attr">name</span>=<span class="hljs-string">&quot;RegexpSinglelineJava&quot;</span>&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">property</span> <span class="hljs-attr">name</span>=<span class="hljs-string">&quot;format&quot;</span>
+              <span class="hljs-attr">value</span>=<span class="hljs-string">&quot;static\s+(final\s+)?(List|Map|Set|Queue|Collection)<span class="hljs-symbol">&amp;lt;</span>&quot;</span>/&gt;</span>
+    <span class="hljs-tag">&lt;<span class="hljs-name">property</span> <span class="hljs-attr">name</span>=<span class="hljs-string">&quot;message&quot;</span>
+              <span class="hljs-attr">value</span>=<span class="hljs-string">&quot;禁止 static 字段持有集合，请使用 Spring 单例 + 有界容器&quot;</span>/&gt;</span>
+<span class="hljs-tag">&lt;/<span class="hljs-name">module</span>&gt;</span>
+</code></pre><h3 id="防线二-监控告警">防线二：监控告警</h3><p>老年代监控不能只看「会不会 OOM」，要看<strong>趋势</strong>：</p>
+<ul>
+<li>老年代使用率 &gt; 80% 持续 15 分钟 → P1 告警；</li>
+<li>Full GC 频率 &gt; 1 次/10 分钟，或单次 STW &gt; 2s → P1 告警；</li>
+<li>堆内大对象分布（通过 JMX 暴露 histo 快照）每周对比一次。</li>
+</ul>
+<h3 id="防线三-上线前小堆压测">防线三：上线前小堆压测</h3><p>泄漏的可怕之处在于「上线时看不出来」。可以在预发环境把堆压到 512M 跑一晚上流量，第二天看老年代曲线——<strong>泄漏的服务在小堆下几小时就 OOM，健康服务会平稳运行</strong>。这次教训足够深刻，后续凡是涉及「内存里攒数据」的代码一律过这道关。</p>
+<h2 id="总结">总结</h2><table>
+<thead>
+<tr>
+<th>环节</th>
+<th>动作</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>发现</td>
+<td>jstat 看 O/FGC 趋势，Full GC 后老年代不回落 = 泄漏</td>
+</tr>
+<tr>
+<td>定位</td>
+<td>jmap -histo 找实例数异常的业务对象</td>
+</tr>
+<tr>
+<td>取证</td>
+<td>-XX:+HeapDumpOnOutOfMemoryError 自动抓现场</td>
+</tr>
+<tr>
+<td>分析</td>
+<td>MAT Dominator Tree + Path to GC Roots，精确到字段</td>
+</tr>
+<tr>
+<td>修复</td>
+<td>去 static 无界集合，改有界队列 + drainTo，失败转 MQ</td>
+</tr>
+<tr>
+<td>预防</td>
+<td>规范禁 static 集合、老年代/GC 告警、小堆压测</td>
+</tr>
+</tbody></table>
+<p>内存泄漏不会自己消失，它只会在某个深夜把服务拖死。把工具链和规范刻进习惯里，救火才能变成防火。</p>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/spring-ai-rag.html"><span>← 上一篇</span><b>Spring AI 实战：构建本地 RAG 知识问答</b></a>
+    <a class="pn-btn next" href="/post/mysql-slow-query.html"><span>下一篇 →</span><b>线上故障排查：一条慢查询引发的服务雪崩</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

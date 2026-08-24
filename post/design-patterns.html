@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Java 设计模式实战：单例、策略与模板方法 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#为什么还要学设计模式">为什么还要学设计模式</a></li><li class="toc-l2"><a href="#单例-双重检查锁-静态内部类-枚举">单例：双重检查锁、静态内部类、枚举</a></li><li class="toc-l2"><a href="#工厂模式-设备协议工厂">工厂模式：设备协议工厂</a></li><li class="toc-l2"><a href="#策略模式-用枚举-map-干掉-if-else">策略模式：用枚举 + Map 干掉 if-else</a></li><li class="toc-l2"><a href="#模板方法-上报处理流程的骨架">模板方法：上报处理流程的骨架</a></li><li class="toc-l2"><a href="#观察者模式-spring-事件监听">观察者模式：Spring 事件监听</a></li><li class="toc-l2"><a href="#建造者模式-lombok-builder-与手写">建造者模式：Lombok @Builder 与手写</a></li><li class="toc-l2"><a href="#一点总结">一点总结</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">📝 学习笔记</span></p>
+      <h1>Java 设计模式实战：单例、策略与模板方法</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2025-08-01</span>
+        <span class="meta-read">☕ 预计阅读 21 分钟</span>
+        <span class="meta-tags"><code>#设计模式</code> <code>#Java</code> <code>#架构</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<h2 id="为什么还要学设计模式">为什么还要学设计模式</h2><p>很多人说设计模式&quot;过时了&quot;，是面试八股。我的看法是：<strong>设计模式是代码坏味道的解药</strong>——你不需要记住二十三种模式的 UML 图，但你需要认识那些反复出现的代码问题，以及对应的成熟解法。</p>
+<p>这篇文章只讲我在真实业务里高频用到的 6 个模式，每个都配完整可跑的 Java 代码。</p>
+<h2 id="单例-双重检查锁-静态内部类-枚举">单例：双重检查锁、静态内部类、枚举</h2><p><strong>场景</strong>：全局唯一的配置读取器、ID 生成器、线程池包装类。在 Spring 项目里 <code>@Component</code> 默认就是单例，但有些工具类不进 Spring 容器，我们就得自己保证单例。</p>
+<p><strong>双重检查锁（DCL）</strong>——懒加载 + 线程安全：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">IdGenerator</span> {
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">volatile</span> IdGenerator instance;
+
+    <span class="hljs-type">private</span> <span class="hljs-title function_">IdGenerator</span><span class="hljs-params">()</span> { }
+
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> <span class="hljs-type">IdGenerator</span> <span class="hljs-title function_">getInstance</span><span class="hljs-params">()</span> {
+        <span class="hljs-keyword">if</span> (instance == <span class="hljs-literal">null</span>) {                 <span class="hljs-comment">// 第一次检查，避免无谓加锁</span>
+            <span class="hljs-keyword">synchronized</span> (IdGenerator.class) {
+                <span class="hljs-keyword">if</span> (instance == <span class="hljs-literal">null</span>) {         <span class="hljs-comment">// 第二次检查，防止重复创建</span>
+                    instance = <span class="hljs-keyword">new</span> <span class="hljs-title class_">IdGenerator</span>();
+                }
+            }
+        }
+        <span class="hljs-keyword">return</span> instance;
+    }
+}
+</code></pre><blockquote>
+<p>为什么 <code>instance</code> 必须是 <code>volatile</code>？因为 <code>new IdGenerator()</code> 不是原子操作：分配内存 → 初始化对象 → 把引用赋值给 instance。没有 volatile，指令重排可能让其他线程拿到&quot;半初始化&quot;的对象。</p>
+</blockquote>
+<p><strong>静态内部类</strong>——利用类加载机制天然实现懒加载 + 线程安全，代码更简洁：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">IdGenerator</span> {
+
+    <span class="hljs-type">private</span> <span class="hljs-title function_">IdGenerator</span><span class="hljs-params">()</span> { }
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">Holder</span> {
+        <span class="hljs-keyword">private</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">final</span> <span class="hljs-type">IdGenerator</span> <span class="hljs-variable">INSTANCE</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">IdGenerator</span>();
+    }
+
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> <span class="hljs-type">IdGenerator</span> <span class="hljs-title function_">getInstance</span><span class="hljs-params">()</span> {
+        <span class="hljs-keyword">return</span> Holder.INSTANCE;
+    }
+}
+</code></pre><p><strong>枚举单例</strong>——《Effective Java》作者推荐的方式，连反射和序列化都能防：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">enum</span> <span class="hljs-title class_">IdGenerator</span> {
+    INSTANCE;
+
+    <span class="hljs-keyword">public</span> <span class="hljs-type">long</span> <span class="hljs-title function_">nextId</span><span class="hljs-params">()</span> {
+        <span class="hljs-comment">// 实现略</span>
+        <span class="hljs-keyword">return</span> System.currentTimeMillis();
+    }
+}
+</code></pre><p><strong>怎么选？</strong> 99% 的业务场景静态内部类就够了；要防反序列化破坏单例、或者想写得最&quot;安全&quot;，用枚举。DCL 现在更多出现在面试题里——不是它不好，而是有更简单的替代。</p>
+<h2 id="工厂模式-设备协议工厂">工厂模式：设备协议工厂</h2><p><strong>场景</strong>：对接 Modbus-TCP、MQTT、自定义二进制协议……每种协议的连接建立、报文解析、心跳处理逻辑完全不同，接入层不能写一坨 if-else 去区分。</p>
+<p><strong>第一步：定义统一接口</strong></p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">interface</span> <span class="hljs-title class_">DeviceProtocolParser</span> {
+
+    <span class="hljs-type">String</span> <span class="hljs-title function_">protocolType</span><span class="hljs-params">()</span>;                       <span class="hljs-comment">// 协议编码</span>
+
+    <span class="hljs-type">DeviceSession</span> <span class="hljs-title function_">connect</span><span class="hljs-params">(String endpoint)</span>;      <span class="hljs-comment">// 连接建立</span>
+
+    <span class="hljs-type">DeviceFrame</span> <span class="hljs-title function_">parseFrame</span><span class="hljs-params">(<span class="hljs-type">byte</span>[] rawData)</span>;      <span class="hljs-comment">// 报文解析</span>
+
+    <span class="hljs-type">void</span> <span class="hljs-title function_">handleHeartbeat</span><span class="hljs-params">(DeviceFrame frame)</span>;     <span class="hljs-comment">// 心跳处理</span>
+}
+</code></pre><p><strong>第二步：实现各种协议</strong></p>
+<pre><code class="language-java"><span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">ModbusTcpParser</span> <span class="hljs-keyword">implements</span> <span class="hljs-title class_">DeviceProtocolParser</span> {
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">String</span> <span class="hljs-title function_">protocolType</span><span class="hljs-params">()</span> { <span class="hljs-keyword">return</span> <span class="hljs-string">&quot;MODBUS_TCP&quot;</span>; }
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">DeviceSession</span> <span class="hljs-title function_">connect</span><span class="hljs-params">(String endpoint)</span> {
+        <span class="hljs-comment">// 建立 TCP 会话，读寄存器，返回会话对象</span>
+        <span class="hljs-keyword">return</span> <span class="hljs-literal">null</span>;
+    }
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">DeviceFrame</span> <span class="hljs-title function_">parseFrame</span><span class="hljs-params">(<span class="hljs-type">byte</span>[] rawData)</span> {
+        <span class="hljs-comment">// 按功能码 + 寄存器地址解析 Modbus 报文</span>
+        <span class="hljs-keyword">return</span> <span class="hljs-literal">null</span>;
+    }
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">handleHeartbeat</span><span class="hljs-params">(DeviceFrame frame)</span> {
+        <span class="hljs-comment">// 更新设备在线时间，断链自动重连</span>
+    }
+}
+
+<span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">MqttParser</span> <span class="hljs-keyword">implements</span> <span class="hljs-title class_">DeviceProtocolParser</span> {
+    <span class="hljs-comment">// 类似实现，略</span>
+}
+</code></pre><p><strong>第三步：工厂负责分发</strong></p>
+<pre><code class="language-java"><span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">DeviceProtocolFactory</span> {
+
+    <span class="hljs-comment">// Spring 会自动把所有 DeviceProtocolParser 实现注入到这个 Map 里</span>
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> Map&lt;String, DeviceProtocolParser&gt; parserMap;
+
+    <span class="hljs-type">public</span> <span class="hljs-title function_">DeviceProtocolFactory</span><span class="hljs-params">(List&lt;DeviceProtocolParser&gt; parsers)</span> {
+        parserMap = parsers.stream()
+                .collect(Collectors.toMap(DeviceProtocolParser::protocolType, p -&gt; p));
+    }
+
+    <span class="hljs-keyword">public</span> <span class="hljs-type">DeviceProtocolParser</span> <span class="hljs-title function_">createProtocolParser</span><span class="hljs-params">(String protocol)</span> {
+        <span class="hljs-type">DeviceProtocolParser</span> <span class="hljs-variable">parser</span> <span class="hljs-operator">=</span> parserMap.get(protocol);
+        <span class="hljs-keyword">if</span> (parser == <span class="hljs-literal">null</span>) {
+            <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">BizException</span>(<span class="hljs-string">&quot;不支持的设备协议: &quot;</span> + protocol);
+        }
+        <span class="hljs-keyword">return</span> parser;
+    }
+}
+</code></pre><p>接入侧只需要一行：<code>deviceProtocolFactory.createProtocolParser(frame.getProtocol()).parseFrame(frame.getRaw());</code>。以后新增一种协议，写一个实现类就完事——<strong>开闭原则</strong>的教科书案例。</p>
+<blockquote>
+<p>这种&quot;接口 + Spring 自动装配 + Map 分发&quot;的写法，实际项目中比传统手写 <code>new</code> 工厂更常用，因为实例的生命周期交给容器管了。</p>
+</blockquote>
+<h2 id="策略模式-用枚举-map-干掉-if-else">策略模式：用枚举 + Map 干掉 if-else</h2><p><strong>场景</strong>：监控系统里阈值告警、变化率告警、离线告警，判定逻辑各不相同。最常见的烂代码长这样：</p>
+<pre><code class="language-java"><span class="hljs-keyword">if</span> (<span class="hljs-string">&quot;THRESHOLD&quot;</span>.equals(alertType)) {
+    result = sample.getValue() &gt;= rule.getThreshold() ? <span class="hljs-string">&quot;ALARM&quot;</span> : <span class="hljs-string">&quot;NORMAL&quot;</span>;
+} <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (<span class="hljs-string">&quot;RATE&quot;</span>.equals(alertType)) {
+    result = (sample.getValue() - sample.getPrevValue()) / sample.getPrevValue()
+            &gt;= rule.getRate() ? <span class="hljs-string">&quot;ALARM&quot;</span> : <span class="hljs-string">&quot;NORMAL&quot;</span>;
+} <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (<span class="hljs-string">&quot;OFFLINE&quot;</span>.equals(alertType)) {
+    <span class="hljs-comment">// ...</span>
+}
+</code></pre><p>每加一种告警类型，这个 if-else 就长一截。用策略模式重构：</p>
+<p><strong>第一步：抽象策略</strong></p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">interface</span> <span class="hljs-title class_">AlertStrategy</span> {
+
+    <span class="hljs-comment">/** 判定设备当前是否需要告警 */</span>
+    <span class="hljs-type">AlertResult</span> <span class="hljs-title function_">evaluate</span><span class="hljs-params">(DeviceSample sample, AlertRule rule)</span>;
+}
+</code></pre><p><strong>第二步：每种告警一个实现</strong></p>
+<pre><code class="language-java"><span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">ThresholdStrategy</span> <span class="hljs-keyword">implements</span> <span class="hljs-title class_">AlertStrategy</span> {
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">AlertResult</span> <span class="hljs-title function_">evaluate</span><span class="hljs-params">(DeviceSample sample, AlertRule rule)</span> {
+        <span class="hljs-keyword">return</span> sample.getValue() &gt;= rule.getThreshold()
+                ? AlertResult.alarm(rule.getCode())
+                : AlertResult.normal();
+    }
+}
+
+<span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">RateChangeStrategy</span> <span class="hljs-keyword">implements</span> <span class="hljs-title class_">AlertStrategy</span> {
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">AlertResult</span> <span class="hljs-title function_">evaluate</span><span class="hljs-params">(DeviceSample sample, AlertRule rule)</span> {
+        <span class="hljs-comment">// 变化率告警：与上一周期相比增幅超过阈值即告警</span>
+        <span class="hljs-type">double</span> <span class="hljs-variable">rate</span> <span class="hljs-operator">=</span> (sample.getValue() - sample.getPrevValue()) / sample.getPrevValue();
+        <span class="hljs-keyword">return</span> rate &gt;= rule.getRate()
+                ? AlertResult.alarm(rule.getCode())
+                : AlertResult.normal();
+    }
+}
+</code></pre><p><strong>第三步：枚举关联类型 + Map 注册</strong></p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">enum</span> <span class="hljs-title class_">AlertType</span> {
+    THRESHOLD, RATE, OFFLINE
+}
+
+<span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">AlertStrategyRegistry</span> {
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> Map&lt;AlertType, AlertStrategy&gt; registry;
+
+    <span class="hljs-type">public</span> <span class="hljs-title function_">AlertStrategyRegistry</span><span class="hljs-params">(Map&lt;AlertType, AlertStrategy&gt; registry)</span> {
+        <span class="hljs-built_in">this</span>.registry = registry;
+    }
+
+    <span class="hljs-keyword">public</span> <span class="hljs-type">AlertResult</span> <span class="hljs-title function_">apply</span><span class="hljs-params">(DeviceSample sample, AlertRule rule)</span> {
+        <span class="hljs-type">AlertStrategy</span> <span class="hljs-variable">strategy</span> <span class="hljs-operator">=</span> registry.get(rule.getType());
+        <span class="hljs-keyword">if</span> (strategy == <span class="hljs-literal">null</span>) {
+            <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">BizException</span>(<span class="hljs-string">&quot;未知的告警类型&quot;</span>);
+        }
+        <span class="hljs-keyword">return</span> strategy.evaluate(sample, rule);
+    }
+}
+</code></pre><p>告警判定处从一段 if-else 变成一行调用，新增告警类型时零改动既有代码。</p>
+<blockquote>
+<p>什么时候不值得用策略模式？判断条件固定且只有两三个分支时，简单 if-else 反而更直白。设计模式是工具，不是 KPI。</p>
+</blockquote>
+<h2 id="模板方法-上报处理流程的骨架">模板方法：上报处理流程的骨架</h2><p><strong>场景</strong>：温度采集上报、振动采集上报、液位采集上报，流程都是&quot;校验 → 入库 → 触发告警 → 通知&quot;，但每一步的具体逻辑不同。把不变的部分写在父类，把变化的部分留给子类实现：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">abstract</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">ReportHandleTemplate</span> {
+
+    <span class="hljs-comment">/** 骨架方法：定义流程，加 final 防止子类改写 */</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">final</span> <span class="hljs-type">void</span> <span class="hljs-title function_">process</span><span class="hljs-params">(ReportContext ctx)</span> {
+        preValidate(ctx);         <span class="hljs-comment">// 1. 前置校验（报文合法性）</span>
+        <span class="hljs-keyword">if</span> (needAlert(ctx)) {     <span class="hljs-comment">// 2. 是否需要触发告警</span>
+            persist(ctx);         <span class="hljs-comment">// 3. 入库</span>
+            triggerAlert(ctx);    <span class="hljs-comment">// 4. 触发告警</span>
+        }
+        postProcess(ctx);         <span class="hljs-comment">// 5. 后置处理（推送实时大屏等）</span>
+    }
+
+    <span class="hljs-comment">/** 钩子方法：默认实现，子类可按需覆盖 */</span>
+    <span class="hljs-keyword">protected</span> <span class="hljs-type">boolean</span> <span class="hljs-title function_">needAlert</span><span class="hljs-params">(ReportContext ctx)</span> { <span class="hljs-keyword">return</span> <span class="hljs-literal">true</span>; }
+
+    <span class="hljs-keyword">protected</span> <span class="hljs-keyword">abstract</span> <span class="hljs-type">void</span> <span class="hljs-title function_">preValidate</span><span class="hljs-params">(ReportContext ctx)</span>;
+    <span class="hljs-keyword">protected</span> <span class="hljs-keyword">abstract</span> <span class="hljs-type">void</span> <span class="hljs-title function_">persist</span><span class="hljs-params">(ReportContext ctx)</span>;
+    <span class="hljs-keyword">protected</span> <span class="hljs-keyword">abstract</span> <span class="hljs-type">void</span> <span class="hljs-title function_">triggerAlert</span><span class="hljs-params">(ReportContext ctx)</span>;
+    <span class="hljs-keyword">protected</span> <span class="hljs-keyword">abstract</span> <span class="hljs-type">void</span> <span class="hljs-title function_">postProcess</span><span class="hljs-params">(ReportContext ctx)</span>;
+}
+</code></pre><p>子类只关心自己的业务差异：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">TemperatureReportHandler</span> <span class="hljs-keyword">extends</span> <span class="hljs-title class_">ReportHandleTemplate</span> {
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">protected</span> <span class="hljs-type">void</span> <span class="hljs-title function_">preValidate</span><span class="hljs-params">(ReportContext ctx)</span> {
+        <span class="hljs-keyword">if</span> (ctx.getFrame().getTemperature() &gt; <span class="hljs-number">150</span>) {
+            <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">BizException</span>(<span class="hljs-string">&quot;温度报文超出合理范围&quot;</span>);
+        }
+    }
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">protected</span> <span class="hljs-type">void</span> <span class="hljs-title function_">persist</span><span class="hljs-params">(ReportContext ctx)</span> {
+        deviceRecordMapper.insert(ctx.getFrame().toRecord());
+    }
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">protected</span> <span class="hljs-type">void</span> <span class="hljs-title function_">triggerAlert</span><span class="hljs-params">(ReportContext ctx)</span> {
+        alertEngine.trigger(<span class="hljs-keyword">new</span> <span class="hljs-title class_">TemperatureAlert</span>(ctx.getFrame().getDeviceNo(),
+                ctx.getFrame().getTemperature()));
+    }
+
+    <span class="hljs-meta">@Override</span>
+    <span class="hljs-keyword">protected</span> <span class="hljs-type">void</span> <span class="hljs-title function_">postProcess</span><span class="hljs-params">(ReportContext ctx)</span> {
+        realtimeScreenSender.push(ctx.getFrame().getDeviceNo(), ctx.getFrame());
+    }
+}
+</code></pre><p>好处：流程骨架只有一份，加新的上报类型 = 新增一个子类，不用碰已有的上报处理逻辑。</p>
+<h2 id="观察者模式-spring-事件监听">观察者模式：Spring 事件监听</h2><p><strong>场景</strong>：设备上报成功后要触发告警推送、刷新实时大屏、写历史库——如果全写在 <code>handleReport()</code> 方法里，方法就成了一条&quot;上帝函数&quot;，而且每加一个动作都要改上报主流程。</p>
+<p>Spring 的事件机制就是观察者模式的最佳实践：</p>
+<pre><code class="language-java"><span class="hljs-comment">// 1. 定义事件</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">DeviceReportedEvent</span> <span class="hljs-keyword">extends</span> <span class="hljs-title class_">ApplicationEvent</span> {
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> DeviceReport report;
+
+    <span class="hljs-type">public</span> <span class="hljs-title function_">DeviceReportedEvent</span><span class="hljs-params">(Object source, DeviceReport report)</span> {
+        <span class="hljs-built_in">super</span>(source);
+        <span class="hljs-built_in">this</span>.report = report;
+    }
+
+    <span class="hljs-keyword">public</span> <span class="hljs-type">DeviceReport</span> <span class="hljs-title function_">getReport</span><span class="hljs-params">()</span> { <span class="hljs-keyword">return</span> report; }
+}
+</code></pre><pre><code class="language-java"><span class="hljs-comment">// 2. 发布事件（上报主流程）</span>
+<span class="hljs-meta">@Service</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">ReportService</span> {
+
+    <span class="hljs-meta">@Autowired</span>
+    <span class="hljs-keyword">private</span> ApplicationEventPublisher publisher;
+
+    <span class="hljs-meta">@Transactional</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">DeviceReport</span> <span class="hljs-title function_">handleReport</span><span class="hljs-params">(ReportDTO dto)</span> {
+        <span class="hljs-type">DeviceReport</span> <span class="hljs-variable">report</span> <span class="hljs-operator">=</span> reportMapper.insert(dto.toEntity());
+        publisher.publishEvent(<span class="hljs-keyword">new</span> <span class="hljs-title class_">DeviceReportedEvent</span>(<span class="hljs-built_in">this</span>, report));
+        <span class="hljs-keyword">return</span> report;
+    }
+}
+</code></pre><pre><code class="language-java"><span class="hljs-comment">// 3. 观察者：各自监听，互不影响</span>
+<span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">AlertPushListener</span> {
+
+    <span class="hljs-meta">@EventListener</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">onDeviceReported</span><span class="hljs-params">(DeviceReportedEvent event)</span> {
+        alertNotifier.send(event.getReport().getDeviceNo(), event.getReport().getStatus());
+    }
+}
+
+<span class="hljs-meta">@Component</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">RealtimeScreenListener</span> {
+
+    <span class="hljs-meta">@EventListener</span>
+    <span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">onDeviceReported</span><span class="hljs-params">(DeviceReportedEvent event)</span> {
+        realtimeScreen.refresh(event.getReport().getDeviceNo(), event.getReport().getTemperature());
+    }
+}
+</code></pre><p>后续想加&quot;上报后写历史库&quot;，新增一个 <code>@EventListener</code> 方法就行，主流程一行不改。</p>
+<blockquote>
+<p>两个提醒：一是事件监听器默认是<strong>同步</strong>执行的，耗时操作记得加 <code>@Async</code>；二是事务内发布的事件处理失败会让整个事务回滚，可以在事务提交后再发布（<code>@TransactionalEventListener</code>）。</p>
+</blockquote>
+<h2 id="建造者模式-lombok-builder-与手写">建造者模式：Lombok @Builder 与手写</h2><p><strong>场景</strong>：参数特别多的&quot;大对象&quot;，比如一个设备配置对象，十几个字段，用 setter 一个个 set 写到手酸，还容易漏。建造者模式把构造过程拆成链式调用：</p>
+<p><strong>Lombok 版本（日常首选）</strong>：</p>
+<pre><code class="language-java"><span class="hljs-meta">@Data</span>
+<span class="hljs-meta">@Builder</span>
+<span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">DeviceConfig</span> {
+    <span class="hljs-keyword">private</span> Long deviceId;
+    <span class="hljs-keyword">private</span> String deviceNo;
+    <span class="hljs-keyword">private</span> String protocol;           <span class="hljs-comment">// MODBUS_TCP / MQTT / CUSTOM_BINARY</span>
+    <span class="hljs-keyword">private</span> String endpoint;           <span class="hljs-comment">// 设备连接地址</span>
+    <span class="hljs-keyword">private</span> Integer collectInterval;   <span class="hljs-comment">// 采集周期（秒）</span>
+    <span class="hljs-keyword">private</span> Double alarmThreshold;     <span class="hljs-comment">// 告警阈值</span>
+    <span class="hljs-keyword">private</span> Integer offlineSeconds;    <span class="hljs-comment">// 离线判定秒数</span>
+}
+
+<span class="hljs-comment">// 使用</span>
+<span class="hljs-type">DeviceConfig</span> <span class="hljs-variable">config</span> <span class="hljs-operator">=</span> DeviceConfig.builder()
+        .deviceNo(<span class="hljs-string">&quot;PRD-LINE-02-CNC-07&quot;</span>)
+        .protocol(<span class="hljs-string">&quot;MODBUS_TCP&quot;</span>)
+        .endpoint(<span class="hljs-string">&quot;192.168.10.21:502&quot;</span>)
+        .collectInterval(<span class="hljs-number">5</span>)
+        .alarmThreshold(<span class="hljs-number">85.0</span>)
+        .build();
+</code></pre><p><strong>手写版本（理解原理）</strong>：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">DeviceConfig</span> {
+
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> Long deviceId;
+    <span class="hljs-keyword">private</span> <span class="hljs-keyword">final</span> String protocol;
+
+    <span class="hljs-type">private</span> <span class="hljs-title function_">DeviceConfig</span><span class="hljs-params">(Builder builder)</span> {
+        <span class="hljs-built_in">this</span>.deviceId = builder.deviceId;
+        <span class="hljs-built_in">this</span>.protocol = builder.protocol;
+    }
+
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> <span class="hljs-type">Builder</span> <span class="hljs-title function_">builder</span><span class="hljs-params">()</span> { <span class="hljs-keyword">return</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">Builder</span>(); }
+
+    <span class="hljs-keyword">public</span> <span class="hljs-keyword">static</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">Builder</span> {
+        <span class="hljs-keyword">private</span> Long deviceId;
+        <span class="hljs-keyword">private</span> String protocol;
+
+        <span class="hljs-keyword">public</span> <span class="hljs-type">Builder</span> <span class="hljs-title function_">deviceId</span><span class="hljs-params">(Long deviceId)</span> { <span class="hljs-built_in">this</span>.deviceId = deviceId; <span class="hljs-keyword">return</span> <span class="hljs-built_in">this</span>; }
+        <span class="hljs-keyword">public</span> <span class="hljs-type">Builder</span> <span class="hljs-title function_">protocol</span><span class="hljs-params">(String protocol)</span> { <span class="hljs-built_in">this</span>.protocol = protocol; <span class="hljs-keyword">return</span> <span class="hljs-built_in">this</span>; }
+
+        <span class="hljs-keyword">public</span> <span class="hljs-type">DeviceConfig</span> <span class="hljs-title function_">build</span><span class="hljs-params">()</span> {
+            <span class="hljs-comment">// 可以在 build 里做参数校验</span>
+            <span class="hljs-keyword">if</span> (deviceId == <span class="hljs-literal">null</span>) {
+                <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">IllegalArgumentException</span>(<span class="hljs-string">&quot;deviceId 不能为空&quot;</span>);
+            }
+            <span class="hljs-keyword">return</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">DeviceConfig</span>(<span class="hljs-built_in">this</span>);
+        }
+    }
+}
+</code></pre><p>手写的优势是能在 <code>build()</code> 里加校验，Lombok 则胜在省事。生产环境我一般直接用 <code>@Builder</code>，参数校验交给 Bean Validation 注解。</p>
+<h2 id="一点总结">一点总结</h2><table>
+<thead>
+<tr>
+<th>模式</th>
+<th>解决什么问题</th>
+<th>我的高频应用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>单例</td>
+<td>全局唯一实例</td>
+<td>工具类、无状态服务</td>
+</tr>
+<tr>
+<td>工厂</td>
+<td>创建逻辑集中、按类型分发</td>
+<td>设备协议解析、配置构造</td>
+</tr>
+<tr>
+<td>策略</td>
+<td>消灭条件分支、算法可替换</td>
+<td>告警策略、协议差异化处理</td>
+</tr>
+<tr>
+<td>模板方法</td>
+<td>固定流程 + 局部变化</td>
+<td>上报处理、批量导入导出</td>
+</tr>
+<tr>
+<td>观察者</td>
+<td>解耦事件与处理方</td>
+<td>Spring 事件、消息消费</td>
+</tr>
+<tr>
+<td>建造者</td>
+<td>复杂对象构造</td>
+<td>配置对象、DTO 拼接</td>
+</tr>
+</tbody></table>
+<p>设计模式的核心就一句话：<strong>把变化的和不变的分离</strong>。能做到这一点，模式叫什么名字反而不重要。</p>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/modbus-java.html"><span>← 上一篇</span><b>Modbus 协议与 Java 实现：工业设备采集第一课</b></a>
+    <a class="pn-btn next" href="/post/mysql-lock.html"><span>下一篇 →</span><b>MySQL 锁机制：从行锁到死锁实战</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>

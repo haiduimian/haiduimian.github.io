@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>工业设备数据采集平台：从 PLC 到数据库的整条链路 · fxy.dev</title>
+<meta name="description" content="工业物联网与设备数据采集技术博客：Modbus、MQTT、Netty 采集平台、Spring Boot、MySQL、全栈与 App 开发">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>☕</text></svg>">
+<script>/* 主题初始化:默认白天,记住用户选择,避免闪烁 */
+(function(){try{var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');}}catch(e){}})();
+</script>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/highlight.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="terminal-dots"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span></div>
+  <nav class="nav">
+    <a class="brand" href="/index.html"><span class="prompt">$</span> fxy@java:~</a>
+    <div class="nav-links">
+      <a href="/index.html" class="">首页</a>
+      <a href="/archive.html" class="active">归档</a>
+      <a href="/about.html" class="">关于</a>
+      <a href="https://github.com/haiduimian" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题" title="切换白天/黑夜模式">🌙</button>
+  </nav>
+</header>
+<main class="post-page">
+  <div class="post-side"><nav class="toc"><h4>页面导航</h4><ul><li class="toc-l2"><a href="#业务背景">业务背景</a></li><li class="toc-l2"><a href="#四层架构">四层架构</a></li><li class="toc-l2"><a href="#采集服务设计">采集服务设计</a></li><li class="toc-l3"><a href="#统一数据模型">统一数据模型</a></li><li class="toc-l3"><a href="#协议解析器接口-可插拔">协议解析器接口：可插拔</a></li><li class="toc-l3"><a href="#netty-接入-为什么不用阻塞-io">Netty 接入：为什么不用阻塞 IO</a></li><li class="toc-l3"><a href="#mqtt-那一侧">MQTT 那一侧</a></li><li class="toc-l2"><a href="#高并发写入-为什么不能同步写-mysql">高并发写入：为什么不能同步写 MySQL</a></li><li class="toc-l2"><a href="#消息队列削峰-批量落库">消息队列削峰 + 批量落库</a></li><li class="toc-l2"><a href="#数据完整性-断线补采与幂等去重">数据完整性：断线补采与幂等去重</a></li><li class="toc-l3"><a href="#断线补采">断线补采</a></li><li class="toc-l3"><a href="#消费幂等去重">消费幂等去重</a></li><li class="toc-l2"><a href="#时序数据分层-热数据-聚合-冷数据">时序数据分层：热数据、聚合、冷数据</a></li><li class="toc-l2"><a href="#踩坑记录">踩坑记录</a></li><li class="toc-l3"><a href="#坑一-时钟不同步导致时间戳错乱">坑一：时钟不同步导致时间戳错乱</a></li><li class="toc-l3"><a href="#坑二-批量插入索引碎片">坑二：批量插入索引碎片</a></li><li class="toc-l3"><a href="#坑三-消费组重平衡导致的重复消费">坑三：消费组重平衡导致的重复消费</a></li><li class="toc-l2"><a href="#小结">小结</a></li></ul></nav></div>
+  <article class="post-body">
+    <header class="post-header">
+      <p class="breadcrumb"><a href="/index.html">~/</a> <span class="crumb-cat">📡 工业物联网</span></p>
+      <h1>工业设备数据采集平台：从 PLC 到数据库的整条链路</h1>
+      <p class="post-meta">
+        <span class="meta-date">📅 2025-10-08</span>
+        <span class="meta-read">☕ 预计阅读 16 分钟</span>
+        <span class="meta-tags"><code>#数据采集</code> <code>#架构</code> <code>#Netty</code> <code>#时序数据库</code></span>
+      </p>
+    </header>
+    <div class="markdown-body">
+<blockquote>
+<p>上一篇讲了怎么用 Modbus 读通一台 PLC。这一篇把镜头拉远：一个工厂 100+ 台设备，
+数据要实时上云做产线监控大屏、报警、历史趋势，整条链路怎么搭、每层怎么防坑。
+以下架构来自我 2025 年下半年交付的散热器厂「设备上云」项目，有删减。</p>
+</blockquote>
+<h2 id="业务背景">业务背景</h2><p>现场设备构成（实际盘点结果）：</p>
+<table>
+<thead>
+<tr>
+<th>设备类型</th>
+<th>数量</th>
+<th>接入方式</th>
+<th>数据频率</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>产线 PLC（S7-200 SMART / 台达）</td>
+<td>30 台</td>
+<td>Modbus TCP，走现场交换机</td>
+<td>每台 20 个测点，2 秒一轮</td>
+</tr>
+<tr>
+<td>电表/传感器（威胜、安科瑞）</td>
+<td>60 台</td>
+<td>RS485 → 边缘网关 → MQTT</td>
+<td>5 秒一轮</td>
+</tr>
+<tr>
+<td>振动/噪声采集器（自研固件）</td>
+<td>10 台</td>
+<td>自定义 TCP 二进制协议</td>
+<td>1 秒一包</td>
+</tr>
+</tbody></table>
+<p>峰值写入约 <strong>1500~2000 点/秒</strong>，一天约 1.5 亿条测点记录。需求是三条：实时监控
+大屏（2 秒内可见）、阈值报警（秒级）、历史趋势查询（月粒度）。</p>
+<h2 id="四层架构">四层架构</h2><pre><code class="language-text">┌───────────────┐   PLC / 电表 / 传感器 / 自研采集器
+│   设备层       │   30×TCP + 60×RS485 + 10×自定义TCP
+└──────┬────────┘
+       │ Modbus TCP / MQTT / 自定义协议
+┌──────┴────────┐
+│   采集层       │   边缘网关 + 采集服务（Netty TCP 接入 + MQTT 订阅）
+│               │   协议解析 → 统一 DataPoint → 发消息队列
+└──────┬────────┘
+       │ Kafka（削峰、解耦、缓冲）
+┌──────┴────────┐
+│   消息层       │   topic: device-point，落库消费组独立部署
+└──────┬────────┘
+       │ 批量写入（每 2 秒一批，5000 条内）
+┌──────┴────────┐
+│   存储层       │   TDengine/InfluxDB（原始时序数据）
+│               │   + MySQL（设备台账、报警规则、聚合结果）
+└───────────────┘
+</code></pre><p>各层职责边界就一句话：<strong>采集层只负责&quot;把数据拿到并保证至少一次投递&quot;，业务计算
+一律往下游放</strong>。这样哪层挂了都能单独重来，不会互相拖累。</p>
+<h2 id="采集服务设计">采集服务设计</h2><h3 id="统一数据模型">统一数据模型</h3><p>不管底层是 Modbus、MQTT 还是自定义 TCP，进了采集服务先归一化成同一个对象：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">class</span> <span class="hljs-title class_">DataPoint</span> {
+    <span class="hljs-keyword">private</span> String deviceId;   <span class="hljs-comment">// 设备唯一编码，如 &quot;PLC-001&quot;</span>
+    <span class="hljs-keyword">private</span> String metric;     <span class="hljs-comment">// 测点，如 &quot;temperature&quot; / &quot;pressure&quot; / &quot;power&quot;</span>
+    <span class="hljs-keyword">private</span> <span class="hljs-type">double</span> value;
+    <span class="hljs-keyword">private</span> <span class="hljs-type">long</span> ts;           <span class="hljs-comment">// 毫秒时间戳（来源见&quot;踩坑一&quot;）</span>
+    <span class="hljs-comment">// getter/setter 省略</span>
+}
+</code></pre><h3 id="协议解析器接口-可插拔">协议解析器接口：可插拔</h3><p>以后每接一种新设备协议，就加一个实现类，采集框架不用动：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-keyword">interface</span> <span class="hljs-title class_">DeviceProtocolDecoder</span> {
+
+    <span class="hljs-comment">/** 协议名，注册表 key，如 &quot;modbus-tcp&quot;、&quot;mysensor-v2&quot; */</span>
+    <span class="hljs-type">String</span> <span class="hljs-title function_">protocolName</span><span class="hljs-params">()</span>;
+
+    <span class="hljs-comment">/**
+     * 从字节流解析出一批测点。
+     * <span class="hljs-doctag">@return</span> false 表示帧不完整，需要继续积累下一个包
+     */</span>
+    <span class="hljs-type">boolean</span> <span class="hljs-title function_">decode</span><span class="hljs-params">(ByteBuf buf, List&lt;DataPoint&gt; out)</span>;
+}
+</code></pre><p>Spring 里把所有实现注入一个 <code>Map&lt;String, DeviceProtocolDecoder&gt;</code>，<code>protocolName()</code>
+做 key；TCP 连接建立后首包带 2 字节协议标识，分发器据此路由。新协议 = 新类 +
+一行配置，这是这套平台能持续接入新设备的关键设计。</p>
+<h3 id="netty-接入-为什么不用阻塞-io">Netty 接入：为什么不用阻塞 IO</h3><p>100+ 设备、上千条并发连接、粘包拆包、编解码，阻塞 IO 的线程模型撑不住也难维护。
+Netty 的典型骨架：</p>
+<pre><code class="language-java"><span class="hljs-type">EventLoopGroup</span> <span class="hljs-variable">boss</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">NioEventLoopGroup</span>(<span class="hljs-number">1</span>);
+<span class="hljs-type">EventLoopGroup</span> <span class="hljs-variable">worker</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">NioEventLoopGroup</span>(Runtime.getRuntime().availableProcessors());
+
+<span class="hljs-type">ServerBootstrap</span> <span class="hljs-variable">b</span> <span class="hljs-operator">=</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">ServerBootstrap</span>();
+b.group(boss, worker)
+ .channel(NioServerSocketChannel.class)
+ .option(ChannelOption.SO_BACKLOG, <span class="hljs-number">1024</span>)
+ .childOption(ChannelOption.TCP_NODELAY, <span class="hljs-literal">true</span>)
+ .childOption(ChannelOption.SO_KEEPALIVE, <span class="hljs-literal">true</span>)
+ .childHandler(<span class="hljs-keyword">new</span> <span class="hljs-title class_">ChannelInitializer</span>&lt;SocketChannel&gt;() {
+     <span class="hljs-meta">@Override</span>
+     <span class="hljs-keyword">protected</span> <span class="hljs-type">void</span> <span class="hljs-title function_">initChannel</span><span class="hljs-params">(SocketChannel ch)</span> {
+         <span class="hljs-comment">// 帧格式统一为 [2字节长度][payload]，避免每个协议手写半包逻辑</span>
+         ch.pipeline().addLast(<span class="hljs-keyword">new</span> <span class="hljs-title class_">LengthFieldBasedFrameDecoder</span>(<span class="hljs-number">1024</span>, <span class="hljs-number">2</span>, <span class="hljs-number">2</span>, <span class="hljs-number">0</span>, <span class="hljs-number">0</span>));
+         ch.pipeline().addLast(<span class="hljs-keyword">new</span> <span class="hljs-title class_">ProtocolDispatcherHandler</span>());
+     }
+ });
+b.bind(<span class="hljs-number">9000</span>).sync();
+</code></pre><p><code>ProtocolDispatcherHandler</code> 里做的事：从帧头取出协议标识 → 查注册表拿到 decoder →
+<code>decode()</code> 出 <code>List&lt;DataPoint&gt;</code> → 同步发送到 Kafka。<strong>注意不要在 Netty 线程里做
+任何 IO 或重活</strong>，只做解析和投递，否则背压一来整条链路延迟全涨。</p>
+<h3 id="mqtt-那一侧">MQTT 那一侧</h3><p>60 台 RS485 电表挂边缘网关，网关上行走 MQTT，topic 规则 <code>iot/{deviceId}/data</code>，
+payload 是 JSON。采集服务自己就是 Paho 客户端，订阅 <code>iot/+/data</code>，解析后走同一
+条 Kafka 管道。设备直接连 EMQX 的也类似——EMQX 规则引擎可以直接转发到 Kafka，
+但为了排查方便，我倾向在采集服务里统一收口，日志只留一处。</p>
+<h2 id="高并发写入-为什么不能同步写-mysql">高并发写入：为什么不能同步写 MySQL</h2><p>第一版图省事，消费线程直接单条 INSERT 写 MySQL，实测（8 核 16G，2000 点/秒）：</p>
+<ul>
+<li>MySQL CPU 干到 70%+，P99 写入延迟 400ms+；</li>
+<li>连接池 50 个连接打满，监控查询开始抢连接；</li>
+<li>主从延迟拉到几十秒，报警查询读到旧数据。</li>
+</ul>
+<p>原因很简单：单条 INSERT 的来回开销、InnoDB 页分裂、二级索引维护成本，都扛不住
+海量高频写入。所以<strong>让 MySQL 干它擅长的事（台账、规则、聚合），时序数据交给
+时序库 + 消息队列削峰</strong>。采集服务到 Kafka 这段用批量发送（linger + batch）：</p>
+<pre><code class="language-yaml"><span class="hljs-attr">spring:</span>
+  <span class="hljs-attr">kafka:</span>
+    <span class="hljs-attr">bootstrap-servers:</span> <span class="hljs-number">10.0</span><span class="hljs-number">.0</span><span class="hljs-number">.31</span><span class="hljs-string">:9092,10.0.0.32:9092</span>
+    <span class="hljs-attr">producer:</span>
+      <span class="hljs-attr">key-serializer:</span> <span class="hljs-string">org.apache.kafka.common.serialization.StringSerializer</span>
+      <span class="hljs-attr">value-serializer:</span> <span class="hljs-string">org.apache.kafka.common.serialization.StringSerializer</span>
+      <span class="hljs-attr">acks:</span> <span class="hljs-number">1</span>                       <span class="hljs-comment"># 测点数据可接受 at-most-once 边缘，追求吞吐</span>
+      <span class="hljs-attr">compression-type:</span> <span class="hljs-string">lz4</span>
+      <span class="hljs-attr">linger.ms:</span> <span class="hljs-number">50</span>                 <span class="hljs-comment"># 攒 50ms 一批发送</span>
+      <span class="hljs-attr">batch-size:</span> <span class="hljs-number">65536</span>
+    <span class="hljs-attr">consumer:</span>
+      <span class="hljs-attr">group-id:</span> <span class="hljs-string">point-ingest</span>
+      <span class="hljs-attr">enable-auto-commit:</span> <span class="hljs-literal">false</span>     <span class="hljs-comment"># 落库成功才提交，失败可重试</span>
+      <span class="hljs-attr">max-poll-records:</span> <span class="hljs-number">5000</span>
+</code></pre><h2 id="消息队列削峰-批量落库">消息队列削峰 + 批量落库</h2><p>消费侧每攒 2 秒（或 5000 条）跑一次批量 INSERT，JDBC 原生 batch：</p>
+<pre><code class="language-java"><span class="hljs-keyword">public</span> <span class="hljs-type">void</span> <span class="hljs-title function_">batchInsert</span><span class="hljs-params">(List&lt;DataPoint&gt; points)</span> {
+    <span class="hljs-type">String</span> <span class="hljs-variable">sql</span> <span class="hljs-operator">=</span> <span class="hljs-string">&quot;INSERT INTO metric_point(device_id, metric, value, ts) VALUES (?,?,?,?)&quot;</span>;
+    <span class="hljs-keyword">try</span> (<span class="hljs-type">Connection</span> <span class="hljs-variable">conn</span> <span class="hljs-operator">=</span> dataSource.getConnection();
+         <span class="hljs-type">PreparedStatement</span> <span class="hljs-variable">ps</span> <span class="hljs-operator">=</span> conn.prepareStatement(sql)) {
+        <span class="hljs-keyword">for</span> (DataPoint p : points) {
+            ps.setString(<span class="hljs-number">1</span>, p.getDeviceId());
+            ps.setString(<span class="hljs-number">2</span>, p.getMetric());
+            ps.setDouble(<span class="hljs-number">3</span>, p.getValue());
+            ps.setTimestamp(<span class="hljs-number">4</span>, <span class="hljs-keyword">new</span> <span class="hljs-title class_">Timestamp</span>(p.getTs()));
+            ps.addBatch();
+        }
+        ps.executeBatch();            <span class="hljs-comment">// 一次网络往返写完一批</span>
+    } <span class="hljs-keyword">catch</span> (SQLException e) {
+        <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> <span class="hljs-title class_">RetriableException</span>(e);   <span class="hljs-comment">// 交给上层：不提交 offset，下轮重试</span>
+    }
+}
+</code></pre><p>两个容易忽略的配置：</p>
+<ul>
+<li>JDBC URL 必须加 <code>rewriteBatchedStatements=true</code>，否则 MySQL 驱动会把 batch
+退化成逐条执行，性能回到解放前；</li>
+<li>消费提交策略：<strong>落库成功才手动 commit</strong>。配合下面的幂等键，重试不会产生重复
+数据，这是&quot;至少一次&quot;语义能成立的保证。</li>
+</ul>
+<h2 id="数据完整性-断线补采与幂等去重">数据完整性：断线补采与幂等去重</h2><h3 id="断线补采">断线补采</h3><p>网关断网期间在本地环形缓存里攒数据（能存 1 万条），恢复后把积压数据按原时间戳
+补发上来——这批数据是<strong>乱序到达</strong>的。处理原则：<strong>时序库按&quot;写入时间&quot;和&quot;数据时间&quot;
+两个维度分别处理，乱序数据照常入库</strong>（TDengine 支持乱序写入，InfluxDB 同样），
+曲线缺口自然补上。服务端同时按设备记录 <code>lastTs</code>，发现连续缺口超过阈值就告警，
+让现场去查网关。</p>
+<h3 id="消费幂等去重">消费幂等去重</h3><p>Kafka 重试 + 网络抖动都可能导致同一条数据落两次，唯一键兜底：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">CREATE TABLE</span> metric_point (
+  id <span class="hljs-type">BIGINT</span> <span class="hljs-keyword">NOT NULL</span> AUTO_INCREMENT,
+  device_id <span class="hljs-type">VARCHAR</span>(<span class="hljs-number">64</span>) <span class="hljs-keyword">NOT NULL</span>,
+  metric <span class="hljs-type">VARCHAR</span>(<span class="hljs-number">64</span>) <span class="hljs-keyword">NOT NULL</span>,
+  <span class="hljs-keyword">value</span> <span class="hljs-keyword">DOUBLE</span> <span class="hljs-keyword">NOT NULL</span>,
+  ts DATETIME(<span class="hljs-number">3</span>) <span class="hljs-keyword">NOT NULL</span>,
+  <span class="hljs-keyword">PRIMARY KEY</span> (id, ts),
+  <span class="hljs-keyword">UNIQUE</span> KEY uk_device_metric_ts (device_id, metric, ts),
+  KEY idx_device_ts (device_id, ts)
+) ENGINE<span class="hljs-operator">=</span>InnoDB <span class="hljs-keyword">DEFAULT</span> CHARSET<span class="hljs-operator">=</span>utf8mb4
+  <span class="hljs-keyword">PARTITION</span> <span class="hljs-keyword">BY</span> <span class="hljs-keyword">RANGE</span> COLUMNS (ts) (
+    <span class="hljs-keyword">PARTITION</span> p202510 <span class="hljs-keyword">VALUES</span> LESS THAN (<span class="hljs-string">&#x27;2025-11-01&#x27;</span>),
+    <span class="hljs-keyword">PARTITION</span> p202511 <span class="hljs-keyword">VALUES</span> LESS THAN (<span class="hljs-string">&#x27;2025-12-01&#x27;</span>),
+    <span class="hljs-keyword">PARTITION</span> p202512 <span class="hljs-keyword">VALUES</span> LESS THAN (<span class="hljs-string">&#x27;2026-01-01&#x27;</span>),
+    <span class="hljs-keyword">PARTITION</span> pMax <span class="hljs-keyword">VALUES</span> LESS THAN (MAXVALUE)
+  );
+</code></pre><p>配合 <code>INSERT IGNORE</code>，重复写入直接跳过：</p>
+<pre><code class="language-java"><span class="hljs-type">String</span> <span class="hljs-variable">sql</span> <span class="hljs-operator">=</span> <span class="hljs-string">&quot;INSERT IGNORE INTO metric_point(device_id, metric, value, ts) VALUES (?,?,?,?)&quot;</span>;
+</code></pre><blockquote>
+<p>注意唯一键为什么是 (device_id, metric, ts) 而不是 (device_id, ts)：同一时刻一台
+设备会同时上报温度、压力、功率多个测点，用后者会把同批次不同测点误判为重复。</p>
+</blockquote>
+<h2 id="时序数据分层-热数据-聚合-冷数据">时序数据分层：热数据、聚合、冷数据</h2><table>
+<thead>
+<tr>
+<th>时间范围</th>
+<th>数据形态</th>
+<th>存储</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>最近 7 天</td>
+<td>原始 2s 粒度</td>
+<td>TDengine（keep=7 天自动清理）</td>
+<td>实时监控、短周期分析</td>
+</tr>
+<tr>
+<td>7 ~ 90 天</td>
+<td>5 分钟聚合（AVG/MAX/MIN）</td>
+<td>MySQL 聚合表</td>
+<td>报表、月报、趋势</td>
+</tr>
+<tr>
+<td>90 天以上</td>
+<td>压缩后的行存文件</td>
+<td>对象存储 / 离线库</td>
+<td>审计、追溯</td>
+</tr>
+</tbody></table>
+<p>聚合任务每小时跑一次，SQL 直接对原始表算（5 分钟粒度）：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">INSERT INTO</span> agg_point_5m(device_id, metric, ts, avg_val, max_val, min_val)
+<span class="hljs-keyword">SELECT</span> device_id,
+       metric,
+       FROM_UNIXTIME(<span class="hljs-built_in">FLOOR</span>(UNIX_TIMESTAMP(ts) <span class="hljs-operator">/</span> <span class="hljs-number">300</span>) <span class="hljs-operator">*</span> <span class="hljs-number">300</span>) <span class="hljs-keyword">AS</span> bucket,
+       <span class="hljs-built_in">AVG</span>(<span class="hljs-keyword">value</span>), <span class="hljs-built_in">MAX</span>(<span class="hljs-keyword">value</span>), <span class="hljs-built_in">MIN</span>(<span class="hljs-keyword">value</span>)
+<span class="hljs-keyword">FROM</span> metric_point
+<span class="hljs-keyword">WHERE</span> ts <span class="hljs-operator">&gt;=</span> ? <span class="hljs-keyword">AND</span> ts <span class="hljs-operator">&lt;</span> ?
+<span class="hljs-keyword">GROUP</span> <span class="hljs-keyword">BY</span> device_id, metric, bucket
+<span class="hljs-keyword">ON</span> DUPLICATE KEY <span class="hljs-keyword">UPDATE</span> avg_val <span class="hljs-operator">=</span> <span class="hljs-keyword">VALUES</span>(avg_val);   <span class="hljs-comment">-- 补采乱序数据重跑覆盖</span>
+</code></pre><p>时序库侧，TDengine 建超级表统一设备测点：</p>
+<pre><code class="language-sql"><span class="hljs-keyword">CREATE</span> STABLE meter_data (
+  ts <span class="hljs-type">TIMESTAMP</span>,
+  v <span class="hljs-type">FLOAT</span>
+) TAGS (device_id <span class="hljs-type">NCHAR</span>(<span class="hljs-number">64</span>), metric <span class="hljs-type">NCHAR</span>(<span class="hljs-number">32</span>));
+
+<span class="hljs-comment">-- 写入：每台设备/每个测点一个子表</span>
+<span class="hljs-keyword">INSERT INTO</span> t_plc001_temp <span class="hljs-keyword">USING</span> meter_data TAGS(<span class="hljs-string">&#x27;PLC-001&#x27;</span>,<span class="hljs-string">&#x27;temperature&#x27;</span>)
+  <span class="hljs-keyword">VALUES</span> (NOW, <span class="hljs-number">235.5</span>);
+</code></pre><p>冷数据在 TTL 前用离线任务导出成 Parquet/CSV 分设备分月归档，MySQL 里只保留聚合
+结果和归档索引，查询走&quot;先聚合表、再归档文件&quot;的路径。</p>
+<h2 id="踩坑记录">踩坑记录</h2><h3 id="坑一-时钟不同步导致时间戳错乱">坑一：时钟不同步导致时间戳错乱</h3><p>上线第三天，趋势图出现一堆&quot;未来数据&quot;：某网关系统时钟快了 2 小时。原因：设备侧
+直接拿本机时间当 <code>ts</code>，网关没做 NTP。处理原则：</p>
+<ul>
+<li><strong>服务端接收时间为主，设备时间为辅</strong>：消费端校验 <code>ts</code> 与当前时间偏差，超过
+阈值（比如 ±5 分钟）就改用接收时间并打 <code>ts_marked=true</code> 标记；</li>
+<li>网关和设备侧统一部署 NTP 同步，偏差超过 30 秒的网关直接置为&quot;时钟异常&quot;告警；</li>
+<li>不要用设备时间做 Kafka 分区键（本例不用），但用设备时间做查询排序一定会踩坑。</li>
+</ul>
+<h3 id="坑二-批量插入索引碎片">坑二：批量插入索引碎片</h3><p>高频批量插入后 <code>uk_device_metric_ts</code> 和 <code>idx_device_ts</code> 索引碎片涨得很快，
+<code>information_schema</code> 里碎片率一度 60%+，查询变慢。对策：</p>
+<ul>
+<li>主键设计成自增 id 开头（append-only），物理顺序尽量贴着时间写；</li>
+<li>表按月分区（见上文建表），分区修剪 + 定期 <code>ALTER TABLE ... REBUILD PARTITION</code>
+或 <code>OPTIMIZE TABLE</code>；</li>
+<li>只保留必要索引：这个表查询只有「设备+时间范围」和「唯一键去重」两种模式，
+多一个没用的索引就是多一份写入成本。</li>
+</ul>
+<h3 id="坑三-消费组重平衡导致的重复消费">坑三：消费组重平衡导致的重复消费</h3><p>Kafka 消费端扩容或故障重启会造成重平衡，已消费未提交的 offset 会重复投递。
+这属于&quot;至少一次&quot;的必然代价，靠幂等键兜底，不要试图用&quot;恰好一次&quot;配置去消除——
+配置复杂且吞吐损失大，生产环境不划算。</p>
+<h2 id="小结">小结</h2><p>整条链路的骨架是：<strong>设备层 → 采集层（Netty + 协议解析）→ 消息层（Kafka 削峰）
+→ 存储层（时序库原始数据 + MySQL 聚合/台账）</strong>。每个环节的关键决策：归一化
+DataPoint 让协议可插拔；批量写入 + rewriteBatchedStatements 撑住 2000 点/秒；
+(device_id, metric, ts) 唯一键让&quot;至少一次&quot;变得可接受；时间戳以服务端为准。
+下一期写采集上线后最刺激的事：400 台设备批量掉线，最后查出是 ClientID 冲突。
+原文 <code>device-collection</code>。</p>
+
+    </div>
+    <div class="pn">
+    <a class="pn-btn" href="/post/bit-trick.html"><span>← 上一篇</span><b>找单独的数：一道题吃透 Java 位运算</b></a>
+    <a class="pn-btn next" href="/post/mqtt-java.html"><span>下一篇 →</span><b>MQTT 协议与 Java 实战：物联网设备接入</b></a>
+  </div>
+  </article>
+</main>
+<footer class="footer">
+  <div class="footer-inner">
+    <p>☕ Built with plain HTML &amp; Java passion · <a href="https://github.com/haiduimian" target="_blank" rel="noopener">@fxy</a></p>
+    <p class="muted">cd /blog &amp;&amp; echo "Have a nice day!"</p>
+  </div>
+</footer>
+<script src="/assets/main.js"></script>
+</body>
+</html>
